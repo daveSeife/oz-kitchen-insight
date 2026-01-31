@@ -1,14 +1,23 @@
+import { useState } from "react";
+import { supabase } from "@/integrations/supabase/client";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
+import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { toast } from "sonner";
+import { CheckCircle, AlertCircle } from "lucide-react";
 
 interface OrderDetailSheetProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   order: any;
+  onUpdate?: () => void;
 }
 
-export const OrderDetailSheet = ({ open, onOpenChange, order }: OrderDetailSheetProps) => {
+export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderDetailSheetProps) => {
+  const [updating, setUpdating] = useState(false);
+
   if (!order) return null;
 
   const items = order.items || order.meal_plans?.meal_plan_items;
@@ -22,6 +31,50 @@ export const OrderDetailSheet = ({ open, onOpenChange, order }: OrderDetailSheet
       cancelled: "bg-red-100 text-red-800",
     };
     return colors[status] || "bg-gray-100 text-gray-800";
+  };
+
+  const handlePaymentStatusUpdate = async (newStatus: string) => {
+    setUpdating(true);
+    try {
+      // Update the order payment status
+      const { error: orderError } = await supabase
+        .from("orders")
+        .update({ payment_status: newStatus })
+        .eq("id", order.id);
+
+      if (orderError) throw orderError;
+
+      // If there's a payment record, update it too
+      const { data: paymentData } = await supabase
+        .from("payments")
+        .select("id")
+        .eq("order_id", order.id)
+        .maybeSingle();
+
+      if (paymentData) {
+        const { error: paymentError } = await supabase
+          .from("payments")
+          .update({ 
+            status: newStatus,
+            processed_at: newStatus === 'completed' ? new Date().toISOString() : null
+          })
+          .eq("id", paymentData.id);
+
+        if (paymentError) throw paymentError;
+      }
+
+      toast.success(`Payment status updated to ${newStatus}`);
+      onUpdate?.();
+    } catch (error: any) {
+      toast.error("Failed to update payment status");
+      console.error(error);
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  const handleConfirmPayment = () => {
+    handlePaymentStatusUpdate('completed');
   };
 
   return (
@@ -103,6 +156,58 @@ export const OrderDetailSheet = ({ open, onOpenChange, order }: OrderDetailSheet
               <Badge variant={order.payment_status === 'completed' ? 'default' : 'secondary'}>
                 {order.payment_status}
               </Badge>
+            </div>
+          </div>
+
+          <Separator />
+
+          {/* Manual Payment Confirmation */}
+          <div>
+            <h4 className="font-medium mb-2">Payment Management</h4>
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <Select
+                  value={order.payment_status}
+                  onValueChange={handlePaymentStatusUpdate}
+                  disabled={updating}
+                >
+                  <SelectTrigger className="w-40">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="pending">Pending</SelectItem>
+                    <SelectItem value="completed">Completed</SelectItem>
+                    <SelectItem value="failed">Failed</SelectItem>
+                    <SelectItem value="refunded">Refunded</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              
+              {order.payment_status !== 'completed' && (
+                <Button 
+                  onClick={handleConfirmPayment} 
+                  disabled={updating}
+                  className="w-full"
+                  variant="default"
+                >
+                  <CheckCircle className="w-4 h-4 mr-2" />
+                  {updating ? "Confirming..." : "Confirm Payment Received"}
+                </Button>
+              )}
+
+              {order.payment_status === 'completed' && (
+                <div className="flex items-center gap-2 text-green-600 text-sm">
+                  <CheckCircle className="w-4 h-4" />
+                  Payment confirmed
+                </div>
+              )}
+
+              {order.payment_status === 'failed' && (
+                <div className="flex items-center gap-2 text-red-600 text-sm">
+                  <AlertCircle className="w-4 h-4" />
+                  Payment failed
+                </div>
+              )}
             </div>
           </div>
 
