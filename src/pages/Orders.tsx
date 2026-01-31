@@ -465,6 +465,7 @@ const Orders = () => {
           open={sheetOpen}
           onOpenChange={setSheetOpen}
           order={selectedOrder}
+          onUpdate={fetchOrders}
         />
       </div>
     </DashboardLayout>

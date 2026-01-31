@@ -22,6 +22,7 @@ interface Meal {
   description: string;
   base_price: number;
   is_available: boolean;
+  is_chefs_choice: boolean;
   category_id: string;
   image_url: string;
   dietary_tags: string[];
@@ -207,9 +208,16 @@ const Meals = () => {
                     <TableCell className="max-w-xs truncate">{meal.description}</TableCell>
                     <TableCell>ETB {meal.base_price}</TableCell>
                     <TableCell>
-                      <Badge variant={meal.is_available ? "default" : "secondary"}>
-                        {meal.is_available ? "Available" : "Unavailable"}
-                      </Badge>
+                      <div className="flex gap-1 flex-wrap">
+                        <Badge variant={meal.is_available ? "default" : "secondary"}>
+                          {meal.is_available ? "Available" : "Unavailable"}
+                        </Badge>
+                        {meal.is_chefs_choice && (
+                          <Badge variant="outline" className="border-primary text-primary">
+                            Chef's Choice
+                          </Badge>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell>
                       <div className="flex gap-1 flex-wrap">

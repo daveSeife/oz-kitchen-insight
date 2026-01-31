@@ -24,6 +24,7 @@ export const MealDialog = ({ open, onOpenChange, meal, onSuccess }: MealDialogPr
     base_price: "",
     category_id: "",
     is_available: true,
+    is_chefs_choice: false,
     image_url: "",
     dietary_tags: "",
     ingredients: "",
@@ -45,6 +46,7 @@ export const MealDialog = ({ open, onOpenChange, meal, onSuccess }: MealDialogPr
         base_price: meal.base_price?.toString() || "",
         category_id: meal.category_id || "",
         is_available: meal.is_available ?? true,
+        is_chefs_choice: meal.is_chefs_choice ?? false,
         image_url: meal.image_url || "",
         dietary_tags: meal.dietary_tags?.join(", ") || "",
         ingredients: meal.ingredients?.join(", ") || "",
@@ -57,6 +59,7 @@ export const MealDialog = ({ open, onOpenChange, meal, onSuccess }: MealDialogPr
         base_price: "",
         category_id: "",
         is_available: true,
+        is_chefs_choice: false,
         image_url: "",
         dietary_tags: "",
         ingredients: "",
@@ -131,6 +134,7 @@ export const MealDialog = ({ open, onOpenChange, meal, onSuccess }: MealDialogPr
         base_price: parseFloat(formData.base_price),
         category_id: formData.category_id || null,
         is_available: formData.is_available,
+        is_chefs_choice: formData.is_chefs_choice,
         image_url: imageUrl,
         dietary_tags: formData.dietary_tags
           ? formData.dietary_tags.split(",").map((tag) => tag.trim())
@@ -225,6 +229,18 @@ export const MealDialog = ({ open, onOpenChange, meal, onSuccess }: MealDialogPr
                   checked={formData.is_available}
                   onCheckedChange={(checked) =>
                     setFormData({ ...formData, is_available: checked })
+                  }
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="is_chefs_choice">Chef's Choice</Label>
+              <div className="flex items-center h-10">
+                <Switch
+                  id="is_chefs_choice"
+                  checked={formData.is_chefs_choice}
+                  onCheckedChange={(checked) =>
+                    setFormData({ ...formData, is_chefs_choice: checked })
                   }
                 />
               </div>

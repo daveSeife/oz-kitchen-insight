@@ -323,6 +323,7 @@ export type Database = {
           image_url: string | null
           ingredients: string[] | null
           is_available: boolean | null
+          is_chefs_choice: boolean | null
           meal_type: string | null
           name: string
           nutritional_info: Json | null
@@ -340,6 +341,7 @@ export type Database = {
           image_url?: string | null
           ingredients?: string[] | null
           is_available?: boolean | null
+          is_chefs_choice?: boolean | null
           meal_type?: string | null
           name: string
           nutritional_info?: Json | null
@@ -357,6 +359,7 @@ export type Database = {
           image_url?: string | null
           ingredients?: string[] | null
           is_available?: boolean | null
+          is_chefs_choice?: boolean | null
           meal_type?: string | null
           name?: string
           nutritional_info?: Json | null
