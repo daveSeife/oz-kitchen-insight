@@ -3,10 +3,11 @@ import { supabase } from "@/integrations/supabase/client";
 import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Search, Download, Calendar } from "lucide-react";
+import { Search, Download, Calendar, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { exportToCSV } from "@/lib/csvExport";
 import { OrderDetailSheet } from "@/components/orders/OrderDetailSheet";
+import { OrderCreateDialog } from "@/components/orders/OrderCreateDialog";
 import {
   Table,
   TableBody,
@@ -71,6 +72,7 @@ const Orders = () => {
   const [search, setSearch] = useState("");
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [startDate, setStartDate] = useState<Date | undefined>(undefined);
   const [endDate, setEndDate] = useState<Date | undefined>(undefined);
@@ -381,6 +383,13 @@ const Orders = () => {
             <Download className="w-4 h-4 mr-2" />
             Export CSV
           </Button>
+
+          {isAdmin && (
+            <Button onClick={() => setCreateDialogOpen(true)}>
+              <Plus className="w-4 h-4 mr-2" />
+              Add Order
+            </Button>
+          )}
         </div>
 
         <div className="border rounded-lg">
@@ -466,6 +475,12 @@ const Orders = () => {
           onOpenChange={setSheetOpen}
           order={selectedOrder}
           onUpdate={fetchOrders}
+        />
+
+        <OrderCreateDialog
+          open={createDialogOpen}
+          onOpenChange={setCreateDialogOpen}
+          onSuccess={fetchOrders}
         />
       </div>
     </DashboardLayout>
