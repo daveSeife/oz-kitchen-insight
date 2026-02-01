@@ -18,6 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 interface Profile {
   id: string;
@@ -39,6 +40,12 @@ export const OrderCreateDialog = ({
 }: OrderCreateDialogProps) => {
   const [loading, setLoading] = useState(false);
   const [users, setUsers] = useState<Profile[]>([]);
+  const [customerMode, setCustomerMode] = useState<"existing" | "new">("existing");
+  const [newCustomer, setNewCustomer] = useState({
+    first_name: "",
+    last_name: "",
+    phone_number: "",
+  });
   const [formData, setFormData] = useState({
     user_id: "",
     subtotal: "",
@@ -90,9 +97,49 @@ export const OrderCreateDialog = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!formData.user_id) {
-      toast.error("Please select a customer");
-      return;
+    let userId = formData.user_id;
+    let customerName = formData.fullName;
+    let customerPhone = formData.phone;
+
+    // If creating a new customer
+    if (customerMode === "new") {
+      if (!newCustomer.first_name.trim()) {
+        toast.error("Please enter customer first name");
+        return;
+      }
+      if (!newCustomer.phone_number.trim()) {
+        toast.error("Please enter customer phone number");
+        return;
+      }
+
+      setLoading(true);
+
+      // Create new profile
+      const { data: newProfile, error: profileError } = await supabase
+        .from("profiles")
+        .insert({
+          first_name: newCustomer.first_name.trim(),
+          last_name: newCustomer.last_name.trim() || null,
+          phone_number: newCustomer.phone_number.trim(),
+        })
+        .select()
+        .single();
+
+      if (profileError) {
+        console.error("Error creating customer:", profileError);
+        toast.error("Failed to create customer");
+        setLoading(false);
+        return;
+      }
+
+      userId = newProfile.id;
+      customerName = `${newCustomer.first_name} ${newCustomer.last_name}`.trim();
+      customerPhone = newCustomer.phone_number;
+    } else {
+      if (!formData.user_id) {
+        toast.error("Please select a customer");
+        return;
+      }
     }
 
     if (!formData.subtotal || parseFloat(formData.subtotal) <= 0) {
@@ -100,7 +147,9 @@ export const OrderCreateDialog = ({
       return;
     }
 
-    setLoading(true);
+    if (customerMode !== "new") {
+      setLoading(true);
+    }
 
     try {
       const subtotal = parseFloat(formData.subtotal);
@@ -109,8 +158,8 @@ export const OrderCreateDialog = ({
       const totalAmount = subtotal + deliveryFee - discountAmount;
 
       const deliveryAddress = {
-        fullName: formData.fullName,
-        phone: formData.phone,
+        fullName: customerMode === "new" ? customerName : formData.fullName,
+        phone: customerMode === "new" ? customerPhone : formData.phone,
         street: {
           street: formData.street,
           city: formData.city,
@@ -123,7 +172,7 @@ export const OrderCreateDialog = ({
       };
 
       const { error } = await supabase.from("orders").insert({
-        user_id: formData.user_id,
+        user_id: userId,
         order_number: generateOrderNumber(),
         subtotal,
         delivery_fee: deliveryFee,
@@ -166,6 +215,12 @@ export const OrderCreateDialog = ({
         landmark: "",
         special_instructions: "",
       });
+      setNewCustomer({
+        first_name: "",
+        last_name: "",
+        phone_number: "",
+      });
+      setCustomerMode("existing");
     } catch (error: any) {
       console.error("Error creating order:", error);
       toast.error(error.message || "Failed to create order");
@@ -195,20 +250,62 @@ export const OrderCreateDialog = ({
 
         <form onSubmit={handleSubmit} className="space-y-6">
           {/* Customer Selection */}
-          <div className="space-y-2">
+          <div className="space-y-4">
             <Label>Customer *</Label>
-            <Select value={formData.user_id} onValueChange={handleUserChange}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select a customer" />
-              </SelectTrigger>
-              <SelectContent>
-                {users.map((user) => (
-                  <SelectItem key={user.id} value={user.id}>
-                    {user.first_name} {user.last_name} {user.phone_number && `(${user.phone_number})`}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <Tabs value={customerMode} onValueChange={(v) => setCustomerMode(v as "existing" | "new")}>
+              <TabsList className="grid w-full grid-cols-2">
+                <TabsTrigger value="existing">Existing Customer</TabsTrigger>
+                <TabsTrigger value="new">New Customer</TabsTrigger>
+              </TabsList>
+              <TabsContent value="existing" className="mt-4">
+                <Select value={formData.user_id} onValueChange={handleUserChange}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select a customer" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {users.map((user) => (
+                      <SelectItem key={user.id} value={user.id}>
+                        {user.first_name} {user.last_name} {user.phone_number && `(${user.phone_number})`}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </TabsContent>
+              <TabsContent value="new" className="mt-4 space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>First Name *</Label>
+                    <Input
+                      value={newCustomer.first_name}
+                      onChange={(e) =>
+                        setNewCustomer((prev) => ({ ...prev, first_name: e.target.value }))
+                      }
+                      placeholder="First name"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Last Name</Label>
+                    <Input
+                      value={newCustomer.last_name}
+                      onChange={(e) =>
+                        setNewCustomer((prev) => ({ ...prev, last_name: e.target.value }))
+                      }
+                      placeholder="Last name"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label>Phone Number *</Label>
+                  <Input
+                    value={newCustomer.phone_number}
+                    onChange={(e) =>
+                      setNewCustomer((prev) => ({ ...prev, phone_number: e.target.value }))
+                    }
+                    placeholder="Phone number"
+                  />
+                </div>
+              </TabsContent>
+            </Tabs>
           </div>
 
           {/* Order Details */}
