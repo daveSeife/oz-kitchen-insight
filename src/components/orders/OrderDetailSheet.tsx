@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Badge } from "@/components/ui/badge";
@@ -17,6 +17,11 @@ interface OrderDetailSheetProps {
 
 export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderDetailSheetProps) => {
   const [updating, setUpdating] = useState(false);
+  const [paymentStatus, setPaymentStatus] = useState<string>(order?.payment_status || "pending");
+
+  useEffect(() => {
+    setPaymentStatus(order?.payment_status || "pending");
+  }, [order?.id, order?.payment_status]);
 
   if (!order) return null;
 
@@ -33,6 +38,12 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
     return colors[status] || "bg-gray-100 text-gray-800";
   };
 
+  const mapOrderPaymentStatusToPaymentStatus = (status: string) => {
+    if (status === "completed") return "completed";
+    if (status === "failed") return "failed";
+    return "pending";
+  };
+
   const handlePaymentStatusUpdate = async (newStatus: string) => {
     setUpdating(true);
     try {
@@ -45,17 +56,23 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
       if (orderError) throw orderError;
 
       // If there's a payment record, update it too
-      const { data: paymentData } = await supabase
+      const { data: paymentData, error: paymentLookupError } = await supabase
         .from("payments")
         .select("id")
         .eq("order_id", order.id)
+        .order("created_at", { ascending: false })
+        .limit(1)
         .maybeSingle();
+
+      if (paymentLookupError) {
+        throw paymentLookupError;
+      }
 
       if (paymentData) {
         const { error: paymentError } = await supabase
           .from("payments")
           .update({ 
-            status: newStatus,
+            status: mapOrderPaymentStatusToPaymentStatus(newStatus),
             processed_at: newStatus === 'completed' ? new Date().toISOString() : null
           })
           .eq("id", paymentData.id);
@@ -63,17 +80,22 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
         if (paymentError) throw paymentError;
       }
 
+      setPaymentStatus(newStatus);
       toast.success(`Payment status updated to ${newStatus}`);
       onUpdate?.();
     } catch (error: any) {
-      toast.error("Failed to update payment status");
+      toast.error(error?.message || "Failed to update payment status");
       console.error(error);
     } finally {
       setUpdating(false);
     }
   };
 
-  const handleConfirmPayment = () => {
+  const handleConfirmUpfrontPayment = () => {
+    handlePaymentStatusUpdate('partial');
+  };
+
+  const handleConfirmRemainingPayment = () => {
     handlePaymentStatusUpdate('completed');
   };
 
@@ -153,8 +175,8 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
               <Badge className={getStatusColor(order.status)}>
                 {order.status}
               </Badge>
-              <Badge variant={order.payment_status === 'completed' ? 'default' : 'secondary'}>
-                {order.payment_status}
+              <Badge variant={paymentStatus === 'completed' ? 'default' : 'secondary'}>
+                {paymentStatus}
               </Badge>
             </div>
           </div>
@@ -167,7 +189,7 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
             <div className="space-y-3">
               <div className="flex items-center gap-2">
                 <Select
-                  value={order.payment_status}
+                  value={paymentStatus}
                   onValueChange={handlePaymentStatusUpdate}
                   disabled={updating}
                 >
@@ -176,33 +198,50 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="pending">Pending</SelectItem>
+                    <SelectItem value="partial">Partial (75%)</SelectItem>
                     <SelectItem value="completed">Completed</SelectItem>
                     <SelectItem value="failed">Failed</SelectItem>
                     <SelectItem value="refunded">Refunded</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
+
+              <p className="text-xs text-muted-foreground">
+                Payment policy: 75% upfront, 25% on delivery.
+              </p>
               
-              {order.payment_status !== 'completed' && (
+              {paymentStatus === 'pending' && (
                 <Button 
-                  onClick={handleConfirmPayment} 
+                  onClick={handleConfirmUpfrontPayment}
                   disabled={updating}
                   className="w-full"
                   variant="default"
                 >
                   <CheckCircle className="w-4 h-4 mr-2" />
-                  {updating ? "Confirming..." : "Confirm Payment Received"}
+                  {updating ? "Confirming..." : "Confirm 75% Upfront Payment"}
                 </Button>
               )}
 
-              {order.payment_status === 'completed' && (
+              {paymentStatus === 'partial' && (
+                <Button 
+                  onClick={handleConfirmRemainingPayment}
+                  disabled={updating}
+                  className="w-full"
+                  variant="default"
+                >
+                  <CheckCircle className="w-4 h-4 mr-2" />
+                  {updating ? "Confirming..." : "Confirm Remaining 25% Payment"}
+                </Button>
+              )}
+
+              {paymentStatus === 'completed' && (
                 <div className="flex items-center gap-2 text-green-600 text-sm">
                   <CheckCircle className="w-4 h-4" />
                   Payment confirmed
                 </div>
               )}
 
-              {order.payment_status === 'failed' && (
+              {paymentStatus === 'failed' && (
                 <div className="flex items-center gap-2 text-red-600 text-sm">
                   <AlertCircle className="w-4 h-4" />
                   Payment failed

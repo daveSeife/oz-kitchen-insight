@@ -439,7 +439,7 @@ const Orders = () => {
                       </Badge>
                     </TableCell>
                     <TableCell>
-                      <Badge variant={order.payment_status === 'completed' ? 'default' : 'secondary'}>
+                      <Badge variant={order.payment_status === 'completed' ? 'default' : order.payment_status === 'failed' ? 'destructive' : 'secondary'}>
                         {order.payment_status}
                       </Badge>
                     </TableCell>

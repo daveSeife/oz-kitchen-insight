@@ -14,6 +14,7 @@ export const PaymentDetailSheet = ({ open, onOpenChange, payment }: PaymentDetai
   const getStatusBadge = (status: string) => {
     const variants: Record<string, "default" | "secondary" | "destructive"> = {
       completed: "default",
+      partial: "secondary",
       pending: "secondary",
       failed: "destructive",
     };
