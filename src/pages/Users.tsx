@@ -21,6 +21,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { MoreVertical, ShieldCheck } from "lucide-react";
+import { getAdminAccess } from "@/lib/adminAuth";
 
 interface Profile {
   id: string;
@@ -61,8 +62,9 @@ const Users = () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
-      const { data, error } = await supabase.rpc('is_super_admin', { user_id: user.id });
-      if (!error && data) {
+      const adminAccess = await getAdminAccess(user.id);
+
+      if (adminAccess.role === 'super_admin') {
         setCurrentUserIsSuperAdmin(true);
       }
     } catch (error) {

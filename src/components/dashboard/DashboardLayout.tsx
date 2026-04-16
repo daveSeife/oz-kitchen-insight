@@ -3,6 +3,7 @@ import { useNavigate, Link, useLocation } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { getAdminAccess } from "@/lib/adminAuth";
 import {
   LayoutDashboard,
   UtensilsCrossed,
@@ -50,16 +51,10 @@ export const DashboardLayout = ({ children }: DashboardLayoutProps) => {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) return;
 
-    // Check if super admin
-    const { data: adminData } = await supabase
-      .from("admin_users")
-      .select("role")
-      .eq("id", session.user.id)
-      .eq("is_active", true)
-      .single();
+    const adminAccess = await getAdminAccess(session.user.id);
 
-    if (adminData) {
-      setUserRole(adminData.role);
+    if (adminAccess.hasAccess) {
+      setUserRole(adminAccess.role);
       return;
     }
 

@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "sonner";
 import { ChefHat, ArrowLeft } from "lucide-react";
+import { getAdminAccess } from "@/lib/adminAuth";
 
 const Login = () => {
   const [email, setEmail] = useState("");
@@ -22,22 +23,18 @@ const Login = () => {
     setLoading(true);
 
     try {
+      const normalizedEmail = email.trim().toLowerCase();
+
       const { data, error } = await supabase.auth.signInWithPassword({
-        email,
+        email: normalizedEmail,
         password,
       });
 
       if (error) throw error;
 
-      // Check if user is an admin
-      const { data: adminData, error: adminError } = await supabase
-        .from("admin_users")
-        .select("*")
-        .eq("id", data.user.id)
-        .eq("is_active", true)
-        .single();
+      const adminAccess = await getAdminAccess(data.user.id);
 
-      if (adminError || !adminData) {
+      if (!adminAccess.hasAccess) {
         await supabase.auth.signOut();
         toast.error("Access denied. Admin privileges required.");
         return;
@@ -46,7 +43,13 @@ const Login = () => {
       toast.success("Welcome back!");
       navigate("/dashboard");
     } catch (error: any) {
-      toast.error(error.message || "Failed to login");
+      const message = error?.message || "Failed to login";
+      if (message.toLowerCase().includes("invalid login credentials")) {
+        toast.error("Invalid email or password. If you just signed up, verify your email first.");
+        return;
+      }
+
+      toast.error(message);
     } finally {
       setLoading(false);
     }
@@ -59,9 +62,11 @@ const Login = () => {
       return;
     }
 
+    const normalizedResetEmail = resetEmail.trim().toLowerCase();
+
     setResetLoading(true);
     try {
-      const { error } = await supabase.auth.resetPasswordForEmail(resetEmail, {
+      const { error } = await supabase.auth.resetPasswordForEmail(normalizedResetEmail, {
         redirectTo: `${window.location.origin}/login?reset=true`,
       });
 

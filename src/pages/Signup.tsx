@@ -33,10 +33,11 @@ const Signup = () => {
     setLoading(true);
 
     try {
+      const normalizedEmail = email.trim().toLowerCase();
       const redirectUrl = `${window.location.origin}/login`;
       
       const { data, error } = await supabase.auth.signUp({
-        email,
+        email: normalizedEmail,
         password,
         options: {
           emailRedirectTo: redirectUrl,

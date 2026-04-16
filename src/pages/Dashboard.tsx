@@ -6,6 +6,7 @@ import { StatsCard } from "@/components/dashboard/StatsCard";
 import { RecentOrders } from "@/components/dashboard/RecentOrders";
 import { RevenueChart } from "@/components/dashboard/RevenueChart";
 import { Users, ShoppingBag, TrendingUp, UtensilsCrossed } from "lucide-react";
+import { getAdminAccess } from "@/lib/adminAuth";
 
 const Dashboard = () => {
   const navigate = useNavigate();
@@ -31,14 +32,9 @@ const Dashboard = () => {
       return;
     }
 
-    const { data: adminData } = await supabase
-      .from("admin_users")
-      .select("*")
-      .eq("id", session.user.id)
-      .eq("is_active", true)
-      .single();
+    const adminAccess = await getAdminAccess(session.user.id);
 
-    if (!adminData) {
+    if (!adminAccess.hasAccess) {
       await supabase.auth.signOut();
       navigate("/login");
     }
