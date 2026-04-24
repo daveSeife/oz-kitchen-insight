@@ -17,10 +17,45 @@ interface OrderDetailSheetProps {
 
 export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderDetailSheetProps) => {
   const [updating, setUpdating] = useState(false);
-  const [paymentStatus, setPaymentStatus] = useState<string>(order?.payment_status || "pending");
+  const [paymentStatus, setPaymentStatus] = useState<string>("pending");
+  const [paymentRecordId, setPaymentRecordId] = useState<string | null>(null);
+
+  const toUiPaymentStatus = (value?: string | null) => {
+    if (value === "paid") return "completed";
+    return value || "pending";
+  };
+
+  const toOrderPaymentStatus = (value: string) => {
+    if (value === "completed") return "paid";
+    if (value === "partial") return "pending";
+    return value;
+  };
 
   useEffect(() => {
-    setPaymentStatus(order?.payment_status || "pending");
+    const loadPaymentStatus = async () => {
+      if (!order?.id) {
+        setPaymentStatus("pending");
+        setPaymentRecordId(null);
+        return;
+      }
+
+      const { data: paymentData, error } = await supabase
+        .from("payments")
+        .select("id, status")
+        .eq("order_id", order.id)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (error) {
+        console.error(error);
+      }
+
+      setPaymentRecordId(paymentData?.id || null);
+      setPaymentStatus(toUiPaymentStatus(paymentData?.status || order.payment_status));
+    };
+
+    void loadPaymentStatus();
   }, [order?.id, order?.payment_status]);
 
   if (!order) return null;
@@ -40,7 +75,9 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
 
   const mapOrderPaymentStatusToPaymentStatus = (status: string) => {
     if (status === "completed") return "completed";
+    if (status === "partial") return "partial";
     if (status === "failed") return "failed";
+    if (status === "refunded") return "refunded";
     return "pending";
   };
 
@@ -50,34 +87,45 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
       // Update the order payment status
       const { error: orderError } = await supabase
         .from("orders")
-        .update({ payment_status: newStatus })
+        .update({ payment_status: toOrderPaymentStatus(newStatus) })
         .eq("id", order.id);
 
       if (orderError) throw orderError;
 
       // If there's a payment record, update it too
-      const { data: paymentData, error: paymentLookupError } = await supabase
-        .from("payments")
-        .select("id")
-        .eq("order_id", order.id)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      const processedAt =
+        newStatus === "completed" || newStatus === "partial"
+          ? new Date().toISOString()
+          : null;
+      const paymentRecordStatus = mapOrderPaymentStatusToPaymentStatus(newStatus);
 
-      if (paymentLookupError) {
-        throw paymentLookupError;
-      }
-
-      if (paymentData) {
+      if (paymentRecordId) {
         const { error: paymentError } = await supabase
           .from("payments")
           .update({ 
-            status: mapOrderPaymentStatusToPaymentStatus(newStatus),
-            processed_at: newStatus === 'completed' ? new Date().toISOString() : null
+            status: paymentRecordStatus,
+            processed_at: processedAt,
           })
-          .eq("id", paymentData.id);
+          .eq("id", paymentRecordId);
 
         if (paymentError) throw paymentError;
+      } else {
+        const { data: newPayment, error: paymentInsertError } = await supabase
+          .from("payments")
+          .insert({
+            order_id: order.id,
+            amount: order.total_amount,
+            payment_method: order.payment_method || "cash",
+            currency: "ETB",
+            status: paymentRecordStatus,
+            processed_at: processedAt,
+          })
+          .select("id")
+          .single();
+
+        if (paymentInsertError) throw paymentInsertError;
+
+        setPaymentRecordId(newPayment.id);
       }
 
       setPaymentStatus(newStatus);
@@ -175,7 +223,7 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
               <Badge className={getStatusColor(order.status)}>
                 {order.status}
               </Badge>
-              <Badge variant={paymentStatus === 'completed' ? 'default' : 'secondary'}>
+              <Badge variant={paymentStatus === 'completed' ? 'default' : paymentStatus === 'failed' ? 'destructive' : 'secondary'}>
                 {paymentStatus}
               </Badge>
             </div>

@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/popover";
 import { Calendar as CalendarComponent } from "@/components/ui/calendar";
 import { format } from "date-fns";
+import { getAdminAccess } from "@/lib/adminAuth";
 
 interface Order {
   id: string;
@@ -76,7 +77,19 @@ const Orders = () => {
   const [isAdmin, setIsAdmin] = useState(false);
   const [startDate, setStartDate] = useState<Date | undefined>(undefined);
   const [endDate, setEndDate] = useState<Date | undefined>(undefined);
-  const [deliveryDateFilter, setDeliveryDateFilter] = useState<Date>(new Date());
+  const [deliveryDateFilter, setDeliveryDateFilter] = useState<Date | undefined>(undefined);
+
+  const formatPaymentStatus = (value?: string | null) => {
+    if (!value) return "pending";
+    if (value === "paid") return "paid";
+    return value;
+  };
+
+  const getPaymentBadgeVariant = (value?: string | null): "default" | "secondary" | "destructive" => {
+    if (value === "paid") return "default";
+    if (value === "failed") return "destructive";
+    return "secondary";
+  };
 
   useEffect(() => {
     checkAdminStatus();
@@ -106,26 +119,26 @@ const Orders = () => {
       return;
     }
 
-    const { data: adminData } = await supabase
-      .from("admin_users")
-      .select("role")
-      .eq("id", user.id)
-      .maybeSingle();
-
-    setIsAdmin(!!adminData);
+    const adminAccess = await getAdminAccess(user.id);
+    setIsAdmin(adminAccess.hasAccess);
   };
 
   const fetchOrders = async () => {
     try {
       setLoading(true);
       const { data: { user } } = await supabase.auth.getUser();
+
+      if (!user) {
+        setOrders([]);
+        return;
+      }
       
       let query = supabase
         .from("orders")
-        .select("*, profiles(first_name, last_name)");
+        .select("*");
       
       // If not admin, only fetch user's own orders
-      if (!isAdmin && user) {
+      if (!isAdmin) {
         query = query.eq("user_id", user.id);
       }
       
@@ -134,13 +147,34 @@ const Orders = () => {
 
       if (ordersError) throw ordersError;
 
-      console.log("Orders data:", ordersData);
-
       const mealPlanIds = (ordersData || [])
         .map((o: any) => o.meal_plan_id)
         .filter((id: string | null) => !!id);
 
-      console.log("Meal plan IDs:", mealPlanIds);
+      const userIds = Array.from(
+        new Set((ordersData || []).map((o: any) => o.user_id).filter(Boolean))
+      );
+
+      let profileMap: Record<string, { first_name: string; last_name: string }> = {};
+
+      if (userIds.length > 0) {
+        const { data: profilesData, error: profilesError } = await supabase
+          .from("profiles")
+          .select("id, first_name, last_name")
+          .in("id", userIds);
+
+        if (profilesError) throw profilesError;
+
+        profileMap = Object.fromEntries(
+          (profilesData || []).map((profile: any) => [
+            profile.id,
+            {
+              first_name: profile.first_name || "",
+              last_name: profile.last_name || "",
+            },
+          ])
+        );
+      }
 
       let itemsByPlan: Record<string, any[]> = {};
 
@@ -191,14 +225,13 @@ const Orders = () => {
 
       const withItems = (ordersData || []).map((o: any) => ({
         ...o,
+        profiles: profileMap[o.user_id] || { first_name: "", last_name: "" },
         items: o.meal_plan_id ? itemsByPlan[o.meal_plan_id] || [] : [],
       }));
 
-      console.log("Orders with items:", withItems);
-
       setOrders(withItems);
     } catch (error: any) {
-      console.error("fetchOrders error", error);
+      console.error("[Orders] fetchOrders error", error);
       toast.error("Failed to fetch orders");
     } finally {
       setLoading(false);
@@ -226,13 +259,16 @@ const Orders = () => {
     const matchesStartDate = !startDate || orderDate >= startDate;
     const matchesEndDate = !endDate || orderDate <= new Date(endDate.setHours(23, 59, 59, 999));
     
-    // Filter by delivery date - check if any item in the order has the selected delivery date
-    const deliveryDateStr = format(deliveryDateFilter, "yyyy-MM-dd");
-    const hasItemForDeliveryDate = (order.items || []).some(
-      item => item.delivery_date === deliveryDateStr
-    );
-    
-    return matchesSearch && matchesStartDate && matchesEndDate && hasItemForDeliveryDate;
+    const matchesDeliveryDate = !deliveryDateFilter || (() => {
+      const deliveryDateStr = format(deliveryDateFilter, "yyyy-MM-dd");
+      const hasItemForDeliveryDate = (order.items || []).some(
+        (item) => item.delivery_date === deliveryDateStr
+      );
+
+      return hasItemForDeliveryDate || order.delivery_date === deliveryDateStr;
+    })();
+
+    return matchesSearch && matchesStartDate && matchesEndDate && matchesDeliveryDate;
   });
 
   const getStatusColor = (status: string) => {
@@ -320,7 +356,9 @@ const Orders = () => {
             <PopoverTrigger asChild>
               <Button variant="default">
                 <Calendar className="w-4 h-4 mr-2" />
-                Delivery: {format(deliveryDateFilter, "MMM dd, yyyy")}
+                {deliveryDateFilter
+                  ? `Delivery: ${format(deliveryDateFilter, "MMM dd, yyyy")}`
+                  : "All delivery dates"}
               </Button>
             </PopoverTrigger>
             <PopoverContent className="w-auto p-0" align="start">
@@ -333,6 +371,15 @@ const Orders = () => {
             </PopoverContent>
           </Popover>
           
+          {deliveryDateFilter && (
+            <Button
+              variant="ghost"
+              onClick={() => setDeliveryDateFilter(undefined)}
+            >
+              Clear Delivery Date
+            </Button>
+          )}
+
           <Popover>
             <PopoverTrigger asChild>
               <Button variant="outline">
@@ -439,8 +486,8 @@ const Orders = () => {
                       </Badge>
                     </TableCell>
                     <TableCell>
-                      <Badge variant={order.payment_status === 'completed' ? 'default' : order.payment_status === 'failed' ? 'destructive' : 'secondary'}>
-                        {order.payment_status}
+                      <Badge variant={getPaymentBadgeVariant(order.payment_status)}>
+                        {formatPaymentStatus(order.payment_status)}
                       </Badge>
                     </TableCell>
                     <TableCell>
