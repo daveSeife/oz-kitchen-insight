@@ -1,22 +1,21 @@
-import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
-import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
-import { Search, Download, Calendar, Plus } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { format } from "date-fns";
+import { Calendar, CheckCircle2, Download, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
-import { exportToCSV } from "@/lib/csvExport";
-import { OrderDetailSheet } from "@/components/orders/OrderDetailSheet";
+
+import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
 import { OrderCreateDialog } from "@/components/orders/OrderCreateDialog";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { OrderDetailSheet } from "@/components/orders/OrderDetailSheet";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Calendar as CalendarComponent } from "@/components/ui/calendar";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -25,47 +24,286 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
-import { Calendar as CalendarComponent } from "@/components/ui/calendar";
-import { format } from "date-fns";
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { supabase } from "@/integrations/supabase/client";
+import type { Tables } from "@/integrations/supabase/types";
 import { getAdminAccess } from "@/lib/adminAuth";
+import { exportToCSV, exportToExcel } from "@/lib/csvExport";
+import {
+  formatAddressText,
+  getDeliveryContactName,
+  getDeliveryContactPhone,
+  getDeliverySpecialInstructions,
+  getMealDayName,
+  normalizeMealType,
+  normalizeOrderMealRow,
+  parseLegacyMealSnapshot,
+  type NormalizedOrderMeal,
+} from "@/lib/orderMeals";
+
+type OrderStatus = "pending" | "confirmed" | "preparing" | "delivered" | "cancelled";
+type OrderMealRowRecord = Tables<"order_meals">;
 
 interface Order {
   id: string;
+  user_id: string;
   order_number: string;
   total_amount: number;
   status: string;
   payment_status: string;
   created_at: string;
-  delivery_address: any;
-  delivery_date: string;
-  delivery_time_slot: string;
-  notes: string;
+  delivery_address: unknown;
+  delivery_date: string | null;
+  delivery_time_slot: string | null;
+  notes: string | null;
   subtotal: number;
   delivery_fee: number;
   discount_amount: number;
-  payment_method: string;
+  payment_method: string | null;
   meal_plan_id: string | null;
   profiles: {
     first_name: string;
     last_name: string;
+    phone_number?: string | null;
   };
-  items?: Array<{
-    id: string;
-    quantity: number;
-    unit_price: number;
-    meal_type: string;
-    delivery_date: string;
-    delivery_time_slot: string;
-    is_half_half?: boolean;
-    meals: { id: string; name: string; image_url: string } | null;
-    half_meal_1: { id: string; name: string; image_url: string } | null;
-    half_meal_2: { id: string; name: string; image_url: string } | null;
-  }>;
+  meals: NormalizedOrderMeal[];
 }
+
+interface OrderedMealRow {
+  meal: NormalizedOrderMeal;
+  order: Order;
+  fullName: string;
+  phone: string;
+  location: string;
+}
+
+interface LatestPaymentRecord {
+  id: string;
+  order_id: string;
+  payment_gateway_response: unknown;
+  created_at: string;
+}
+
+const isMissingOrderMealsTableError = (error: { code?: string; message?: string; hint?: string } | null | undefined) => {
+  if (!error) return false;
+
+  return (
+    error.code === "42P01" ||
+    error.code === "PGRST205" ||
+    error.message?.includes("public.order_meals") ||
+    error.hint?.includes("public.orders")
+  );
+};
+
+const getMealNoteText = (meal: NormalizedOrderMeal, order: Pick<Order, "delivery_address" | "notes">) => {
+  if (meal.customer_note?.trim()) return meal.customer_note.trim();
+
+  const specialInstructions = getDeliverySpecialInstructions(order.delivery_address);
+  if (specialInstructions.trim()) {
+    return specialInstructions.trim();
+  }
+
+  if (
+    typeof order.notes === "string" &&
+    order.notes.trim() &&
+    !order.notes.trim().startsWith("{") &&
+    !order.notes.trim().startsWith("[")
+  ) {
+    return order.notes.trim();
+  }
+
+  return "";
+};
+
+const normalizeTextKey = (value?: string | null) => (value || "").trim().toLowerCase();
+
+type MealSourceRef =
+  | { source: "order_meals"; id: string }
+  | { source: "legacy_snapshot"; payment_record_id: string; snapshot_index: number };
+
+const getMealSourceRefs = (meal: NormalizedOrderMeal): MealSourceRef[] => {
+  const existingRefs = meal.metadata.source_refs;
+  if (Array.isArray(existingRefs)) {
+    return existingRefs.filter((ref): ref is MealSourceRef => {
+      if (!ref || typeof ref !== "object") return false;
+
+      if (
+        (ref as Record<string, unknown>).source === "order_meals" &&
+        typeof (ref as Record<string, unknown>).id === "string"
+      ) {
+        return true;
+      }
+
+      return (
+        (ref as Record<string, unknown>).source === "legacy_snapshot" &&
+        typeof (ref as Record<string, unknown>).payment_record_id === "string" &&
+        typeof (ref as Record<string, unknown>).snapshot_index === "number"
+      );
+    });
+  }
+
+  if (meal.source === "order_meals" && meal.id) {
+    return [{ source: "order_meals", id: meal.id }];
+  }
+
+  const paymentRecordId =
+    typeof meal.metadata.payment_record_id === "string" ? meal.metadata.payment_record_id : null;
+  const snapshotIndex =
+    typeof meal.metadata.snapshot_index === "number" ? meal.metadata.snapshot_index : null;
+
+  if (meal.source === "legacy_snapshot" && paymentRecordId && snapshotIndex !== null) {
+    return [{ source: "legacy_snapshot", payment_record_id: paymentRecordId, snapshot_index: snapshotIndex }];
+  }
+
+  return [];
+};
+
+const getMealRefKey = (meal: NormalizedOrderMeal) => {
+  const refs = getMealSourceRefs(meal);
+  if (refs.length > 0) {
+    return refs
+      .map((ref) =>
+        ref.source === "order_meals"
+          ? `order_meals:${ref.id}`
+          : `legacy_snapshot:${ref.payment_record_id}:${ref.snapshot_index}`,
+      )
+      .sort()
+      .join("|");
+  }
+
+  return `${meal.source}:${meal.id}`;
+};
+
+const getMealFingerprint = (meal: NormalizedOrderMeal) =>
+  [
+    meal.order_id,
+    normalizeTextKey(meal.meal_id),
+    normalizeTextKey(meal.meal_name),
+    normalizeTextKey(meal.scheduled_date),
+    normalizeTextKey(meal.scheduled_time_slot),
+    meal.quantity,
+    meal.unit_price,
+    normalizeTextKey(meal.meal_type),
+    normalizeTextKey(meal.customer_note),
+  ].join("|");
+
+const getMealSourceMatchKey = (meal: NormalizedOrderMeal) =>
+  [
+    normalizeTextKey(meal.order_id),
+    normalizeTextKey(meal.meal_id || meal.meal_name),
+    normalizeTextKey(meal.scheduled_date),
+    normalizeTextKey(meal.scheduled_time_slot),
+    normalizeTextKey(meal.status),
+    normalizeTextKey(meal.customer_note),
+  ].join("|");
+
+const mergeMealRecords = (existing: NormalizedOrderMeal, incoming: NormalizedOrderMeal): NormalizedOrderMeal => {
+  const preferred =
+    existing.source === "order_meals" || incoming.source !== "order_meals" ? existing : incoming;
+  const secondary = preferred === existing ? incoming : existing;
+
+  const combinedRefs = [...getMealSourceRefs(existing), ...getMealSourceRefs(incoming)];
+  const uniqueRefs = Array.from(
+    new Map(
+      combinedRefs.map((ref) => [
+        ref.source === "order_meals"
+          ? `order_meals:${ref.id}`
+          : `legacy_snapshot:${ref.payment_record_id}:${ref.snapshot_index}`,
+        ref,
+      ]),
+    ).values(),
+  );
+
+  return {
+    ...preferred,
+    meal_id: preferred.meal_id || secondary.meal_id,
+    meal_name: preferred.meal_name || secondary.meal_name,
+    meal_category: preferred.meal_category || secondary.meal_category,
+    meal_type: preferred.meal_type || secondary.meal_type,
+    dietary_tags:
+      preferred.dietary_tags.length > 0 ? preferred.dietary_tags : secondary.dietary_tags,
+    scheduled_date: preferred.scheduled_date || secondary.scheduled_date,
+    scheduled_time_slot: preferred.scheduled_time_slot || secondary.scheduled_time_slot,
+    customer_note: preferred.customer_note || secondary.customer_note,
+    metadata: {
+      ...secondary.metadata,
+      ...preferred.metadata,
+      source_refs: uniqueRefs,
+    },
+  };
+};
+
+const dedupeMeals = (meals: NormalizedOrderMeal[]) => {
+  const deduped = new Map<string, NormalizedOrderMeal>();
+  const refIndex = new Map<string, string>();
+  const fingerprintIndex = new Map<string, string>();
+  const sourceMatchIndex = new Map<string, string>();
+
+  for (const meal of meals) {
+    const refKey = getMealRefKey(meal);
+    const fingerprint = getMealFingerprint(meal);
+    const sourceMatchKey = getMealSourceMatchKey(meal);
+    const existingKey =
+      refIndex.get(refKey) ||
+      fingerprintIndex.get(fingerprint) ||
+      sourceMatchIndex.get(sourceMatchKey);
+
+    const existing = existingKey ? deduped.get(existingKey) : undefined;
+    if (!existing) {
+      deduped.set(refKey, meal);
+      refIndex.set(refKey, refKey);
+      fingerprintIndex.set(fingerprint, refKey);
+      sourceMatchIndex.set(sourceMatchKey, refKey);
+      continue;
+    }
+
+    const mergedMeal = mergeMealRecords(existing, meal);
+    deduped.set(existingKey!, mergedMeal);
+
+    for (const ref of getMealSourceRefs(mergedMeal)) {
+      refIndex.set(
+        ref.source === "order_meals"
+          ? `order_meals:${ref.id}`
+          : `legacy_snapshot:${ref.payment_record_id}:${ref.snapshot_index}`,
+        existingKey!,
+      );
+    }
+
+    fingerprintIndex.set(getMealFingerprint(mergedMeal), existingKey!);
+    sourceMatchIndex.set(getMealSourceMatchKey(mergedMeal), existingKey!);
+  }
+
+  return Array.from(deduped.values());
+};
+
+const getOrderedMealRowKey = (row: OrderedMealRow) => `${row.order.id}::${getMealRefKey(row.meal)}`;
+
+const getMealQuantityTotal = (rows: OrderedMealRow[]) =>
+  rows.reduce((sum, row) => sum + (row.meal.quantity || 0), 0);
+
+const deriveOrderStatusFromMeals = (meals: NormalizedOrderMeal[], currentStatus?: string | null): OrderStatus => {
+  if (meals.length === 0) {
+    return (currentStatus as OrderStatus) || "pending";
+  }
+
+  const activeMeals = meals.filter((meal) => meal.status !== "cancelled");
+  if (activeMeals.length === 0) return "cancelled";
+  if (activeMeals.every((meal) => meal.status === "delivered")) return "delivered";
+  if (activeMeals.some((meal) => meal.status === "delivered")) return "preparing";
+
+  if (currentStatus === "pending" || currentStatus === "confirmed" || currentStatus === "preparing") {
+    return currentStatus;
+  }
+
+  return "confirmed";
+};
 
 const Orders = () => {
   const [orders, setOrders] = useState<Order[]>([]);
@@ -75,9 +313,14 @@ const Orders = () => {
   const [sheetOpen, setSheetOpen] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [activeTab, setActiveTab] = useState("ordered-meals");
   const [startDate, setStartDate] = useState<Date | undefined>(undefined);
   const [endDate, setEndDate] = useState<Date | undefined>(undefined);
   const [deliveryDateFilter, setDeliveryDateFilter] = useState<Date | undefined>(undefined);
+  const [selectedMealDate, setSelectedMealDate] = useState<Date | undefined>(undefined);
+  const [selectedTimeSlot, setSelectedTimeSlot] = useState("all");
+  const [selectedMealType, setSelectedMealType] = useState("all");
+  const [updatingMealId, setUpdatingMealId] = useState<string | null>(null);
 
   const formatPaymentStatus = (value?: string | null) => {
     if (!value) return "pending";
@@ -91,29 +334,21 @@ const Orders = () => {
     return "secondary";
   };
 
-  useEffect(() => {
-    checkAdminStatus();
-  }, []);
+  const getMealStatusColor = (status: string) => {
+    const colors: Record<string, string> = {
+      scheduled: "bg-amber-100 text-amber-800",
+      modified: "bg-sky-100 text-sky-800",
+      delivered: "bg-emerald-100 text-emerald-800",
+      cancelled: "bg-rose-100 text-rose-800",
+    };
+    return colors[status] || "bg-gray-100 text-gray-800";
+  };
 
-  useEffect(() => {
-    if (isAdmin !== null) {
-      fetchOrders();
-      
-      const channel = supabase
-        .channel('orders-changes')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => {
-          fetchOrders();
-        })
-        .subscribe();
+  const checkAdminStatus = useCallback(async () => {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
 
-      return () => {
-        supabase.removeChannel(channel);
-      };
-    }
-  }, [isAdmin]);
-
-  const checkAdminStatus = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
     if (!user) {
       setIsAdmin(false);
       return;
@@ -121,216 +356,503 @@ const Orders = () => {
 
     const adminAccess = await getAdminAccess(user.id);
     setIsAdmin(adminAccess.hasAccess);
-  };
+  }, []);
 
-  const fetchOrders = async () => {
+  const fetchOrders = useCallback(async () => {
     try {
       setLoading(true);
-      const { data: { user } } = await supabase.auth.getUser();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
 
       if (!user) {
         setOrders([]);
         return;
       }
-      
-      let query = supabase
-        .from("orders")
-        .select("*");
-      
-      // If not admin, only fetch user's own orders
+
+      let ordersQuery = supabase.from("orders").select("*");
+
       if (!isAdmin) {
-        query = query.eq("user_id", user.id);
+        ordersQuery = ordersQuery.eq("user_id", user.id);
       }
-      
-      const { data: ordersData, error: ordersError } = await query
-        .order("created_at", { ascending: false });
+
+      const { data: ordersData, error: ordersError } = await ordersQuery.order("created_at", {
+        ascending: false,
+      });
 
       if (ordersError) throw ordersError;
 
-      const mealPlanIds = (ordersData || [])
-        .map((o: any) => o.meal_plan_id)
-        .filter((id: string | null) => !!id);
+      const orderIds = (ordersData || []).map((order) => order.id);
+      const userIds = Array.from(new Set((ordersData || []).map((order) => order.user_id).filter(Boolean)));
 
-      const userIds = Array.from(
-        new Set((ordersData || []).map((o: any) => o.user_id).filter(Boolean))
+      const [{ data: profilesData, error: profilesError }, { data: paymentsData, error: paymentsError }, orderMealsResponse] =
+        await Promise.all([
+          userIds.length > 0
+            ? supabase.from("profiles").select("id, first_name, last_name, phone_number").in("id", userIds)
+            : Promise.resolve({ data: [], error: null }),
+          orderIds.length > 0
+            ? supabase
+                .from("payments")
+                .select("id, order_id, payment_gateway_response, created_at")
+                .in("order_id", orderIds)
+                .order("created_at", { ascending: false })
+            : Promise.resolve({ data: [], error: null }),
+          orderIds.length > 0
+            ? supabase.from("order_meals").select("*").in("order_id", orderIds)
+            : Promise.resolve({ data: [], error: null }),
+        ]);
+
+      if (profilesError) throw profilesError;
+      if (paymentsError) throw paymentsError;
+
+      const orderMealsError = orderMealsResponse?.error;
+      if (orderMealsError && !isMissingOrderMealsTableError(orderMealsError)) {
+        throw orderMealsError;
+      }
+
+      const profileMap = Object.fromEntries(
+        (profilesData || []).map((profile) => [
+          profile.id,
+          {
+            first_name: profile.first_name || "",
+            last_name: profile.last_name || "",
+            phone_number: profile.phone_number || "",
+          },
+        ]),
       );
 
-      let profileMap: Record<string, { first_name: string; last_name: string }> = {};
-
-      if (userIds.length > 0) {
-        const { data: profilesData, error: profilesError } = await supabase
-          .from("profiles")
-          .select("id, first_name, last_name")
-          .in("id", userIds);
-
-        if (profilesError) throw profilesError;
-
-        profileMap = Object.fromEntries(
-          (profilesData || []).map((profile: any) => [
-            profile.id,
-            {
-              first_name: profile.first_name || "",
-              last_name: profile.last_name || "",
-            },
-          ])
-        );
-      }
-
-      let itemsByPlan: Record<string, any[]> = {};
-
-      if (mealPlanIds.length > 0) {
-        const { data: itemsData, error: itemsError } = await supabase
-          .from("meal_plan_items")
-          .select("id, meal_plan_id, meal_id, half_meal_1_id, half_meal_2_id, quantity, unit_price, meal_type, is_half_half, delivery_date, delivery_time_slot")
-          .in("meal_plan_id", mealPlanIds);
-
-        if (itemsError) throw itemsError;
-
-        const mealIds = Array.from(
-          new Set(
-            (itemsData || []).flatMap((i: any) => [i.meal_id, i.half_meal_1_id, i.half_meal_2_id].filter(Boolean))
-          )
-        );
-
-        let mealMap: Record<string, any> = {};
-        if (mealIds.length > 0) {
-          const { data: mealsData, error: mealsError } = await supabase
-            .from("meals")
-            .select("id, name, image_url")
-            .in("id", mealIds);
-
-          if (mealsError) throw mealsError;
-          mealMap = Object.fromEntries((mealsData || []).map((m: any) => [m.id, m]));
+      const latestPaymentByOrder = new Map<string, LatestPaymentRecord>();
+      for (const payment of paymentsData || []) {
+        if (!latestPaymentByOrder.has(payment.order_id)) {
+          latestPaymentByOrder.set(payment.order_id, payment);
         }
-
-        itemsByPlan = (itemsData || []).reduce((acc: Record<string, any[]>, i: any) => {
-          const key = i.meal_plan_id;
-          const normalized = {
-            id: i.id,
-            quantity: i.quantity,
-            unit_price: i.unit_price,
-            meal_type: i.meal_type,
-            delivery_date: i.delivery_date,
-            delivery_time_slot: i.delivery_time_slot,
-            is_half_half: !!(i.half_meal_1_id && i.half_meal_2_id) || i.is_half_half === true,
-            meals: i.meal_id ? mealMap[i.meal_id] || null : null,
-            half_meal_1: i.half_meal_1_id ? mealMap[i.half_meal_1_id] || null : null,
-            half_meal_2: i.half_meal_2_id ? mealMap[i.half_meal_2_id] || null : null,
-          };
-          acc[key] = acc[key] || [];
-          acc[key].push(normalized);
-          return acc;
-        }, {});
       }
 
-      const withItems = (ordersData || []).map((o: any) => ({
-        ...o,
-        profiles: profileMap[o.user_id] || { first_name: "", last_name: "" },
-        items: o.meal_plan_id ? itemsByPlan[o.meal_plan_id] || [] : [],
-      }));
+      const mealsByOrder = new Map<string, NormalizedOrderMeal[]>();
+      const fallbackMealsByOrder = new Map<string, NormalizedOrderMeal[]>();
+      const mealIds = new Set<string>();
 
-      setOrders(withItems);
-    } catch (error: any) {
+      for (const row of (orderMealsResponse?.data as OrderMealRowRecord[] | null) || []) {
+        const normalized = normalizeOrderMealRow(row);
+        const existing = mealsByOrder.get(normalized.order_id) || [];
+        existing.push(normalized);
+        mealsByOrder.set(normalized.order_id, existing);
+        if (normalized.meal_id) {
+          mealIds.add(normalized.meal_id);
+        }
+      }
+
+      for (const order of ordersData || []) {
+        const payment = latestPaymentByOrder.get(order.id);
+        const fallbackMeals = parseLegacyMealSnapshot(
+          order.id,
+          payment?.payment_gateway_response,
+          order.delivery_date,
+          order.delivery_time_slot,
+          payment?.id,
+        );
+
+        fallbackMealsByOrder.set(order.id, fallbackMeals);
+        for (const meal of fallbackMeals) {
+          if (meal.meal_id) {
+            mealIds.add(meal.meal_id);
+          }
+        }
+      }
+
+      const { data: mealCatalogData, error: mealCatalogError } =
+        mealIds.size > 0
+          ? await supabase.from("meals").select("id, name, meal_type").in("id", Array.from(mealIds))
+          : { data: [], error: null };
+
+      if (mealCatalogError) throw mealCatalogError;
+
+      const mealCatalogMap = new Map(
+        (mealCatalogData || []).map((meal) => [meal.id, meal]),
+      );
+
+      const enrichMeal = (meal: NormalizedOrderMeal): NormalizedOrderMeal => {
+        const catalogMeal = meal.meal_id ? mealCatalogMap.get(meal.meal_id) : null;
+
+        return {
+          ...meal,
+          meal_name: catalogMeal?.name || meal.meal_name,
+          // Keep the ordered meal type authoritative; only fall back to catalog when missing.
+          meal_type: normalizeMealType(meal.meal_type || catalogMeal?.meal_type),
+        };
+      };
+
+      const normalizedOrders: Order[] = (ordersData || []).map((order) => {
+        const orderMeals = (mealsByOrder.get(order.id) || []).map(enrichMeal);
+        const fallbackMeals = (fallbackMealsByOrder.get(order.id) || []).map(enrichMeal);
+
+        const meals = dedupeMeals([...orderMeals, ...fallbackMeals]).sort((a, b) => {
+          const left = `${a.scheduled_date || ""} ${a.scheduled_time_slot || ""}`;
+          const right = `${b.scheduled_date || ""} ${b.scheduled_time_slot || ""}`;
+          return left.localeCompare(right);
+        });
+
+        return {
+          ...order,
+          status: order.status || "pending",
+          payment_status: order.payment_status || "pending",
+          profiles: profileMap[order.user_id] || { first_name: "", last_name: "", phone_number: "" },
+          meals,
+        };
+      });
+
+      setOrders(normalizedOrders);
+    } catch (error: unknown) {
       console.error("[Orders] fetchOrders error", error);
       toast.error("Failed to fetch orders");
     } finally {
       setLoading(false);
     }
-  };
+  }, [isAdmin]);
+
+  useEffect(() => {
+    void checkAdminStatus();
+  }, [checkAdminStatus]);
+
+  useEffect(() => {
+    void fetchOrders();
+
+    const channel = supabase
+      .channel("admin-orders-view")
+      .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, () => {
+        void fetchOrders();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "payments" }, () => {
+        void fetchOrders();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "order_meals" }, () => {
+        void fetchOrders();
+      })
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [fetchOrders]);
 
   const updateOrderStatus = async (orderId: string, newStatus: string) => {
     try {
-      const { error } = await supabase
-        .from("orders")
-        .update({ status: newStatus })
-        .eq("id", orderId);
+      const { error } = await supabase.from("orders").update({ status: newStatus }).eq("id", orderId);
 
       if (error) throw error;
       toast.success("Order status updated");
-      fetchOrders();
-    } catch (error: any) {
+      void fetchOrders();
+    } catch (error) {
       toast.error("Failed to update order status");
     }
   };
 
-  const filteredOrders = orders.filter((order) => {
-    const matchesSearch = order.order_number.toLowerCase().includes(search.toLowerCase());
-    const orderDate = new Date(order.created_at);
-    const matchesStartDate = !startDate || orderDate >= startDate;
-    const matchesEndDate = !endDate || orderDate <= new Date(endDate.setHours(23, 59, 59, 999));
-    
-    const matchesDeliveryDate = !deliveryDateFilter || (() => {
-      const deliveryDateStr = format(deliveryDateFilter, "yyyy-MM-dd");
-      const hasItemForDeliveryDate = (order.items || []).some(
-        (item) => item.delivery_date === deliveryDateStr
+  const updateMealStatus = async (
+    meal: NormalizedOrderMeal,
+    orderId: string,
+    nextStatus: "scheduled" | "delivered",
+  ) => {
+    try {
+      setUpdatingMealId(meal.id);
+
+      const sourceRefs = getMealSourceRefs(meal);
+      if (sourceRefs.length === 0) {
+        throw new Error("This meal record does not have any writable source references.");
+      }
+
+      const orderMealIds = sourceRefs
+        .filter((ref): ref is Extract<MealSourceRef, { source: "order_meals" }> => ref.source === "order_meals")
+        .map((ref) => ref.id);
+
+      if (orderMealIds.length > 0) {
+        const response = await supabase
+          .from("order_meals")
+          .update({ status: nextStatus })
+          .in("id", orderMealIds);
+
+        if (response.error) throw response.error;
+      }
+
+      const legacyRefs = sourceRefs.filter(
+        (ref): ref is Extract<MealSourceRef, { source: "legacy_snapshot" }> => ref.source === "legacy_snapshot",
       );
 
-      return hasItemForDeliveryDate || order.delivery_date === deliveryDateStr;
-    })();
+      const legacyRefsByPayment = new Map<string, number[]>();
+      for (const ref of legacyRefs) {
+        const existing = legacyRefsByPayment.get(ref.payment_record_id) || [];
+        existing.push(ref.snapshot_index);
+        legacyRefsByPayment.set(ref.payment_record_id, existing);
+      }
 
-    return matchesSearch && matchesStartDate && matchesEndDate && matchesDeliveryDate;
-  });
+      for (const [paymentRecordId, snapshotIndexes] of legacyRefsByPayment.entries()) {
+        const { data: paymentRecord, error: paymentFetchError } = await supabase
+          .from("payments")
+          .select("payment_gateway_response")
+          .eq("id", paymentRecordId)
+          .single();
 
-  const getStatusColor = (status: string) => {
-    const colors: Record<string, string> = {
-      pending: "bg-yellow-100 text-yellow-800",
-      confirmed: "bg-blue-100 text-blue-800",
-      preparing: "bg-purple-100 text-purple-800",
-      delivered: "bg-green-100 text-green-800",
-      cancelled: "bg-red-100 text-red-800",
-    };
-    return colors[status] || "bg-gray-100 text-gray-800";
+        if (paymentFetchError) throw paymentFetchError;
+
+        const gatewayResponse = paymentRecord?.payment_gateway_response;
+        const responseRecord =
+          gatewayResponse && typeof gatewayResponse === "object" && !Array.isArray(gatewayResponse)
+            ? (gatewayResponse as Record<string, unknown>)
+            : null;
+
+        const snapshotRoot = Array.isArray(responseRecord?.meal_snapshot)
+          ? [...responseRecord.meal_snapshot]
+          : Array.isArray(gatewayResponse)
+            ? [...gatewayResponse]
+            : [];
+
+        for (const snapshotIndex of snapshotIndexes) {
+          const snapshotItem = snapshotRoot[snapshotIndex];
+          if (!snapshotItem || typeof snapshotItem !== "object" || Array.isArray(snapshotItem)) {
+            throw new Error("Unable to update this legacy meal snapshot.");
+          }
+
+          snapshotRoot[snapshotIndex] = {
+            ...(snapshotItem as Record<string, unknown>),
+            status: nextStatus,
+          };
+        }
+
+        const nextGatewayResponse =
+          responseRecord && "meal_snapshot" in responseRecord
+            ? { ...responseRecord, meal_snapshot: snapshotRoot }
+            : snapshotRoot;
+
+        const response = await supabase
+          .from("payments")
+          .update({ payment_gateway_response: nextGatewayResponse })
+          .eq("id", paymentRecordId);
+
+        if (response.error) throw response.error;
+      }
+
+      const refreshedOrderMealsResponse = await supabase
+        .from("order_meals")
+        .select("*")
+        .eq("order_id", orderId);
+
+      let nextOrderStatus: OrderStatus | null = null;
+
+      if (!refreshedOrderMealsResponse.error) {
+        const refreshedMeals = ((refreshedOrderMealsResponse.data as OrderMealRowRecord[] | null) || []).map((row) =>
+          normalizeOrderMealRow(row),
+        );
+        nextOrderStatus = deriveOrderStatusFromMeals(refreshedMeals);
+      } else if (isMissingOrderMealsTableError(refreshedOrderMealsResponse.error)) {
+        const legacyPaymentRefs = Array.from(legacyRefsByPayment.keys());
+        const paymentRecordId = legacyPaymentRefs[0] || null;
+
+        if (paymentRecordId) {
+          const { data: paymentRecord, error: paymentFetchError } = await supabase
+            .from("payments")
+            .select("payment_gateway_response")
+            .eq("id", paymentRecordId)
+            .single();
+
+          if (paymentFetchError) throw paymentFetchError;
+
+          const legacyMeals = parseLegacyMealSnapshot(orderId, paymentRecord?.payment_gateway_response);
+          nextOrderStatus = deriveOrderStatusFromMeals(legacyMeals);
+        }
+      } else {
+        throw refreshedOrderMealsResponse.error;
+      }
+
+      if (nextOrderStatus) {
+        const { error: orderStatusError } = await supabase
+          .from("orders")
+          .update({ status: nextOrderStatus })
+          .eq("id", orderId);
+
+        if (orderStatusError) throw orderStatusError;
+      }
+
+      toast.success(nextStatus === "delivered" ? "Meal marked as delivered" : "Meal marked as scheduled");
+      void fetchOrders();
+    } catch (error) {
+      console.error("[Orders] updateMealStatus error", error);
+      toast.error("Failed to update meal status");
+    } finally {
+      setUpdatingMealId(null);
+    }
   };
 
-  const handleExportCSV = () => {
-    const exportData = filteredOrders.map(order => {
-      const addr = order.delivery_address;
-      
-      // Format meal items
-      const mealsList = (order.items || []).map(item => {
-        if (item.is_half_half) {
-          const meal1Name = item.half_meal_1?.name || 'Unknown';
-          const meal2Name = item.half_meal_2?.name || 'Unknown';
-          return `${meal1Name} & ${meal2Name} (Half-Half, Qty: ${item.quantity}, ${item.meal_type}, ${item.delivery_date}, ${item.delivery_time_slot})`;
-        } else {
-          const mealName = item.meals?.name || 'Unknown';
-          return `${mealName} (Qty: ${item.quantity}, ${item.meal_type}, ${item.delivery_date}, ${item.delivery_time_slot})`;
-        }
-      }).join(' | ');
-      
-      return {
-        order_number: order.order_number,
-        customer_name: `${order.profiles?.first_name || ''} ${order.profiles?.last_name || ''}`.trim(),
-        phone: addr?.phone || '',
-        full_name: addr?.fullName || '',
-        street: addr?.street?.street || '',
-        city: addr?.street?.city || '',
-        zone: addr?.street?.zone || '',
-        building_number: addr?.street?.building_number || '',
-        floor: addr?.street?.floor || '',
-        landmark: addr?.street?.landmark || '',
-        special_instructions: addr?.street?.special_instructions || '',
-        meals: mealsList,
-        total_amount: order.total_amount,
-        subtotal: order.subtotal,
-        delivery_fee: order.delivery_fee,
-        discount_amount: order.discount_amount,
-        status: order.status,
-        payment_status: order.payment_status,
-        payment_method: order.payment_method || '',
-        delivery_date: order.delivery_date || '',
-        delivery_time_slot: order.delivery_time_slot || '',
-        notes: order.notes || '',
-        created_at: new Date(order.created_at).toLocaleString(),
-      };
+  const filteredOrders = useMemo(() => {
+    return orders.filter((order) => {
+      const customerName = getDeliveryContactName(
+        order.delivery_address,
+        `${order.profiles.first_name} ${order.profiles.last_name}`.trim(),
+      );
+      const phone = getDeliveryContactPhone(order.delivery_address, order.profiles.phone_number || "");
+      const matchesSearch =
+        order.order_number.toLowerCase().includes(search.toLowerCase()) ||
+        customerName.toLowerCase().includes(search.toLowerCase()) ||
+        phone.toLowerCase().includes(search.toLowerCase());
+
+      const orderDate = new Date(order.created_at);
+      const matchesStartDate = !startDate || orderDate >= startDate;
+      const matchesEndDate =
+        !endDate ||
+        orderDate <=
+          new Date(
+            endDate.getFullYear(),
+            endDate.getMonth(),
+            endDate.getDate(),
+            23,
+            59,
+            59,
+            999,
+          );
+
+      const matchesDeliveryDate =
+        !deliveryDateFilter ||
+        order.meals.some((meal) => meal.scheduled_date === format(deliveryDateFilter, "yyyy-MM-dd")) ||
+        order.delivery_date === format(deliveryDateFilter, "yyyy-MM-dd");
+
+      return matchesSearch && matchesStartDate && matchesEndDate && matchesDeliveryDate;
+    });
+  }, [deliveryDateFilter, endDate, orders, search, startDate]);
+
+  const orderedMealRows = useMemo<OrderedMealRow[]>(() => {
+    const rows = orders.flatMap((order) => {
+      const fullName = getDeliveryContactName(
+        order.delivery_address,
+        `${order.profiles.first_name || ""} ${order.profiles.last_name || ""}`.trim(),
+      );
+      const phone = getDeliveryContactPhone(order.delivery_address, order.profiles.phone_number || "");
+      const location = formatAddressText(order.delivery_address);
+
+      return order.meals.map((meal) => ({
+        meal,
+        order,
+        fullName,
+        phone,
+        location,
+      }));
     });
 
-    exportToCSV(
-      exportData,
-      'orders',
-      ['order_number', 'customer_name', 'phone', 'full_name', 'street', 'city', 'zone', 'building_number', 'floor', 'landmark', 'special_instructions', 'meals', 'total_amount', 'subtotal', 'delivery_fee', 'discount_amount', 'status', 'payment_status', 'payment_method', 'delivery_date', 'delivery_time_slot', 'notes', 'created_at']
+    return rows.sort((left, right) => {
+      const leftKey = [
+        left.meal.scheduled_date || "",
+        left.meal.scheduled_time_slot || "",
+        left.fullName.toLowerCase(),
+        left.meal.meal_name.toLowerCase(),
+      ].join("::");
+      const rightKey = [
+        right.meal.scheduled_date || "",
+        right.meal.scheduled_time_slot || "",
+        right.fullName.toLowerCase(),
+        right.meal.meal_name.toLowerCase(),
+      ].join("::");
+
+      return leftKey.localeCompare(rightKey);
+    });
+  }, [orders]);
+
+  const timeSlotOptions = useMemo(() => {
+    return Array.from(
+      new Set(orderedMealRows.map((row) => row.meal.scheduled_time_slot).filter(Boolean)),
+    ).sort();
+  }, [orderedMealRows]);
+
+  const filteredOrderedMeals = useMemo(() => {
+    return orderedMealRows.filter((row) => {
+      const haystack = [
+        row.fullName,
+        row.phone,
+        row.location,
+        row.meal.meal_name,
+        row.meal.customer_note || "",
+        row.order.order_number,
+      ]
+        .join(" ")
+        .toLowerCase();
+
+      const matchesSearch = haystack.includes(search.toLowerCase());
+      const matchesDate =
+        !selectedMealDate || row.meal.scheduled_date === format(selectedMealDate, "yyyy-MM-dd");
+      const matchesTime = selectedTimeSlot === "all" || row.meal.scheduled_time_slot === selectedTimeSlot;
+      const matchesType = selectedMealType === "all" || row.meal.meal_type === selectedMealType;
+
+      return matchesSearch && matchesDate && matchesTime && matchesType;
+    });
+  }, [orderedMealRows, search, selectedMealDate, selectedMealType, selectedTimeSlot]);
+
+  const orderedMealsSummary = useMemo(() => {
+    const delivered = filteredOrderedMeals.filter((row) => row.meal.status === "delivered");
+    const remaining = filteredOrderedMeals.filter(
+      (row) => row.meal.status !== "delivered" && row.meal.status !== "cancelled",
     );
-    toast.success('Orders exported successfully');
+    const cancelled = filteredOrderedMeals.filter((row) => row.meal.status === "cancelled");
+
+    return {
+      delivered,
+      remaining,
+      cancelled,
+      deliveredCount: getMealQuantityTotal(delivered),
+      remainingCount: getMealQuantityTotal(remaining),
+      cancelledCount: getMealQuantityTotal(cancelled),
+    };
+  }, [filteredOrderedMeals]);
+
+  const handleExportOrders = () => {
+    const exportData = filteredOrders.map((order) => ({
+      order_number: order.order_number,
+      customer_name: getDeliveryContactName(
+        order.delivery_address,
+        `${order.profiles.first_name || ""} ${order.profiles.last_name || ""}`.trim(),
+      ),
+      phone: getDeliveryContactPhone(order.delivery_address, order.profiles.phone_number || ""),
+      total_meals: order.meals.reduce((sum, meal) => sum + meal.quantity, 0),
+      payment_status: formatPaymentStatus(order.payment_status),
+      meal_breakdown: order.meals
+        .map(
+          (meal) =>
+            `${meal.meal_name} (${meal.scheduled_date || "-"} ${meal.scheduled_time_slot || ""}, ${meal.status})`,
+        )
+        .join(" | "),
+      total_amount: order.total_amount,
+      status: order.status,
+      created_at: new Date(order.created_at).toLocaleString(),
+    }));
+
+    exportToCSV(exportData, "orders", [
+      "order_number",
+      "customer_name",
+      "phone",
+      "total_meals",
+      "payment_status",
+      "meal_breakdown",
+      "total_amount",
+      "status",
+      "created_at",
+    ]);
+    toast.success("Orders exported successfully");
+  };
+
+  const handleExportOrderedMeals = () => {
+    const exportData = filteredOrderedMeals.map((row) => ({
+      order_number: row.order.order_number,
+      full_name: row.fullName,
+      phone: row.phone,
+      location: row.location,
+      meal: row.meal.meal_name,
+      quantity: row.meal.quantity,
+      delivery_guy: "",
+      notes: getMealNoteText(row.meal, row.order),
+    }));
+
+    exportToExcel(
+      exportData,
+      "ordered_meals",
+      ["order_number", "full_name", "phone", "location", "meal", "quantity", "delivery_guy", "notes"],
+      ["Order #", "Full Name", "Phone", "Location", "Meal", "Quantity", "Delivery Guy", "Notes"],
+    );
+    toast.success("Ordered meals exported successfully");
   };
 
   return (
@@ -338,197 +860,396 @@ const Orders = () => {
       <div className="space-y-6">
         <div>
           <h1 className="text-3xl font-bold">Orders</h1>
-          <p className="text-muted-foreground">Manage customer orders</p>
+          <p className="text-muted-foreground">
+            Orders remain the payment bundle, while ordered meals run daily delivery operations.
+          </p>
         </div>
 
-        <div className="flex items-center gap-4 flex-wrap">
-          <div className="relative flex-1 max-w-sm">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <Input
-              placeholder="Search by order number..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="pl-10"
-            />
+        <Tabs value={activeTab} onValueChange={setActiveTab}>
+          <div className="flex items-center justify-between gap-4 flex-wrap">
+            <TabsList>
+              <TabsTrigger value="ordered-meals">Ordered Meals</TabsTrigger>
+              <TabsTrigger value="orders">Orders View</TabsTrigger>
+            </TabsList>
+
+            <div className="flex items-center gap-3 flex-wrap">
+              <div className="relative min-w-[260px]">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                <Input
+                  placeholder={
+                    activeTab === "ordered-meals"
+                      ? "Search customer, phone, meal, location..."
+                      : "Search order number, customer, phone..."
+                  }
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="pl-10"
+                />
+              </div>
+
+              {activeTab === "ordered-meals" ? (
+                <Button onClick={handleExportOrderedMeals} variant="outline">
+                  <Download className="w-4 h-4 mr-2" />
+                  Export Excel
+                </Button>
+              ) : (
+                <Button onClick={handleExportOrders} variant="outline">
+                  <Download className="w-4 h-4 mr-2" />
+                  Export Orders
+                </Button>
+              )}
+
+              {isAdmin && (
+                <Button onClick={() => setCreateDialogOpen(true)}>
+                  <Plus className="w-4 h-4 mr-2" />
+                  Add Order
+                </Button>
+              )}
+            </div>
           </div>
 
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button variant="default">
-                <Calendar className="w-4 h-4 mr-2" />
-                {deliveryDateFilter
-                  ? `Delivery: ${format(deliveryDateFilter, "MMM dd, yyyy")}`
-                  : "All delivery dates"}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-auto p-0" align="start">
-              <CalendarComponent
-                mode="single"
-                selected={deliveryDateFilter}
-                onSelect={(date) => date && setDeliveryDateFilter(date)}
-                initialFocus
-              />
-            </PopoverContent>
-          </Popover>
-          
-          {deliveryDateFilter && (
-            <Button
-              variant="ghost"
-              onClick={() => setDeliveryDateFilter(undefined)}
-            >
-              Clear Delivery Date
-            </Button>
-          )}
+          <TabsContent value="ordered-meals" className="space-y-6">
+            <div className="flex items-center gap-3 flex-wrap">
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline">
+                    <Calendar className="w-4 h-4 mr-2" />
+                    {selectedMealDate ? format(selectedMealDate, "MMM dd, yyyy") : "All meal dates"}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0" align="start">
+                  <CalendarComponent
+                    mode="single"
+                    selected={selectedMealDate}
+                    onSelect={setSelectedMealDate}
+                    initialFocus
+                  />
+                </PopoverContent>
+              </Popover>
 
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button variant="outline">
-                <Calendar className="w-4 h-4 mr-2" />
-                {startDate ? format(startDate, "MMM dd, yyyy") : "Order Start Date"}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-auto p-0" align="start">
-              <CalendarComponent
-                mode="single"
-                selected={startDate}
-                onSelect={setStartDate}
-                initialFocus
-              />
-            </PopoverContent>
-          </Popover>
-
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button variant="outline">
-                <Calendar className="w-4 h-4 mr-2" />
-                {endDate ? format(endDate, "MMM dd, yyyy") : "Order End Date"}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-auto p-0" align="start">
-              <CalendarComponent
-                mode="single"
-                selected={endDate}
-                onSelect={setEndDate}
-                initialFocus
-              />
-            </PopoverContent>
-          </Popover>
-
-          {(startDate || endDate) && (
-            <Button 
-              variant="ghost" 
-              onClick={() => {
-                setStartDate(undefined);
-                setEndDate(undefined);
-              }}
-            >
-              Clear Order Dates
-            </Button>
-          )}
-
-          <Button onClick={handleExportCSV} variant="outline">
-            <Download className="w-4 h-4 mr-2" />
-            Export CSV
-          </Button>
-
-          {isAdmin && (
-            <Button onClick={() => setCreateDialogOpen(true)}>
-              <Plus className="w-4 h-4 mr-2" />
-              Add Order
-            </Button>
-          )}
-        </div>
-
-        <div className="border rounded-lg">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Order #</TableHead>
-                <TableHead>Customer</TableHead>
-                <TableHead>Amount</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Payment</TableHead>
-                <TableHead>Date</TableHead>
-                <TableHead>Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {loading ? (
-                <TableRow>
-                  <TableCell colSpan={7} className="text-center py-8">
-                    Loading...
-                  </TableCell>
-                </TableRow>
-              ) : filteredOrders.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={7} className="text-center py-8">
-                    No orders found
-                  </TableCell>
-                </TableRow>
-              ) : (
-                filteredOrders.map((order) => (
-                  <TableRow 
-                    key={order.id} 
-                    className="cursor-pointer hover:bg-muted/50"
-                    onClick={() => {
-                      setSelectedOrder(order);
-                      setSheetOpen(true);
-                    }}
-                  >
-                    <TableCell className="font-medium">{order.order_number}</TableCell>
-                    <TableCell>
-                      {order.profiles?.first_name} {order.profiles?.last_name}
-                    </TableCell>
-                    <TableCell>ETB {order.total_amount.toLocaleString()}</TableCell>
-                    <TableCell>
-                      <Badge className={getStatusColor(order.status)}>
-                        {order.status}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={getPaymentBadgeVariant(order.payment_status)}>
-                        {formatPaymentStatus(order.payment_status)}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      {new Date(order.created_at).toLocaleDateString()}
-                    </TableCell>
-                    <TableCell onClick={(e) => e.stopPropagation()}>
-                      <Select
-                        value={order.status}
-                        onValueChange={(value) => updateOrderStatus(order.id, value)}
-                      >
-                        <SelectTrigger className="w-32">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="pending">Pending</SelectItem>
-                          <SelectItem value="confirmed">Confirmed</SelectItem>
-                          <SelectItem value="preparing">Preparing</SelectItem>
-                          <SelectItem value="delivered">Delivered</SelectItem>
-                          <SelectItem value="cancelled">Cancelled</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </TableCell>
-                  </TableRow>
-                ))
+              {selectedMealDate && (
+                <Button variant="ghost" onClick={() => setSelectedMealDate(undefined)}>
+                  Clear Meal Date
+                </Button>
               )}
-            </TableBody>
-          </Table>
-        </div>
 
-        <OrderDetailSheet
-          open={sheetOpen}
-          onOpenChange={setSheetOpen}
-          order={selectedOrder}
-          onUpdate={fetchOrders}
-        />
+              <Button variant="outline" onClick={() => setSelectedMealDate(new Date())}>
+                Today's Deliveries
+              </Button>
 
-        <OrderCreateDialog
-          open={createDialogOpen}
-          onOpenChange={setCreateDialogOpen}
-          onSuccess={fetchOrders}
-        />
+              <Select value={selectedTimeSlot} onValueChange={setSelectedTimeSlot}>
+                <SelectTrigger className="w-[180px]">
+                  <SelectValue placeholder="Time slot" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Times</SelectItem>
+                  {timeSlotOptions.map((timeSlot) => (
+                    <SelectItem key={timeSlot} value={timeSlot}>
+                      {timeSlot}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              <Select value={selectedMealType} onValueChange={setSelectedMealType}>
+                <SelectTrigger className="w-[180px]">
+                  <SelectValue placeholder="Meal type" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Meal Types</SelectItem>
+                  <SelectItem value="fasting">Fasting</SelectItem>
+                  <SelectItem value="non-fasting">Non-Fasting</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-3">
+              <div className="rounded-lg border p-4">
+                <p className="text-sm text-muted-foreground">Remaining Meals</p>
+                <p className="text-3xl font-semibold">{orderedMealsSummary.remainingCount}</p>
+              </div>
+              <div className="rounded-lg border p-4">
+                <p className="text-sm text-muted-foreground">Delivered Meals</p>
+                <p className="text-3xl font-semibold">{orderedMealsSummary.deliveredCount}</p>
+              </div>
+              <div className="rounded-lg border p-4">
+                <p className="text-sm text-muted-foreground">Cancelled Meals</p>
+                <p className="text-3xl font-semibold">{orderedMealsSummary.cancelledCount}</p>
+              </div>
+            </div>
+
+            <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
+              <div className="border rounded-lg overflow-hidden">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Order #</TableHead>
+                      <TableHead>Full Name</TableHead>
+                      <TableHead>Phone</TableHead>
+                      <TableHead>Location</TableHead>
+                      <TableHead>Meal</TableHead>
+                      <TableHead>Qty</TableHead>
+                      <TableHead>Delivery Guy</TableHead>
+                      <TableHead>Notes</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {loading ? (
+                      <TableRow>
+                        <TableCell colSpan={8} className="text-center py-8">
+                          Loading...
+                        </TableCell>
+                      </TableRow>
+                    ) : filteredOrderedMeals.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={8} className="text-center py-8">
+                          No meals found for the selected filters
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      filteredOrderedMeals.map((row) => (
+                        <TableRow key={getOrderedMealRowKey(row)}>
+                          <TableCell className="font-mono text-xs">{row.order.order_number}</TableCell>
+                          <TableCell className="font-medium">{row.fullName || "-"}</TableCell>
+                          <TableCell>{row.phone || "-"}</TableCell>
+                          <TableCell className="max-w-[240px] whitespace-normal">{row.location || "-"}</TableCell>
+                          <TableCell>
+                            <div className="space-y-2">
+                              <div className="font-medium">{row.meal.meal_name}</div>
+                              <div className="text-xs text-muted-foreground">
+                                {getMealDayName(row.meal.scheduled_date) || "Unscheduled day"}
+                                {row.meal.scheduled_date ? `, ${row.meal.scheduled_date}` : ""}
+                                {row.meal.scheduled_time_slot ? `, ${row.meal.scheduled_time_slot}` : ""}
+                                {row.meal.quantity > 1 ? `, Qty ${row.meal.quantity}` : ""}
+                              </div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <Badge variant="outline" className="capitalize">
+                                  {row.meal.meal_type}
+                                </Badge>
+                                <Badge className={getMealStatusColor(row.meal.status)}>{row.meal.status}</Badge>
+                              </div>
+                            </div>
+                          </TableCell>
+                          <TableCell>{row.meal.quantity}</TableCell>
+                          <TableCell />
+                          <TableCell className="min-w-[220px]">
+                            <div className="space-y-3">
+                              <p className="text-sm text-muted-foreground">
+                                {getMealNoteText(row.meal, row.order) || "-"}
+                              </p>
+                              <label className="flex items-center gap-2 text-sm">
+                                <Checkbox
+                                  checked={row.meal.status === "delivered"}
+                                  disabled={updatingMealId === row.meal.id}
+                                  onCheckedChange={(checked) =>
+                                    void updateMealStatus(row.meal, row.order.id, checked ? "delivered" : "scheduled")
+                                  }
+                                />
+                                <span className="inline-flex items-center gap-1">
+                                  <CheckCircle2 className="w-4 h-4" />
+                                  Mark delivered
+                                </span>
+                              </label>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+
+              <div className="rounded-lg border p-4">
+                <h3 className="font-semibold">Delivery Log</h3>
+                <p className="text-sm text-muted-foreground mb-4">
+                  Delivered meals from the current filtered view.
+                </p>
+                <div className="space-y-3">
+                  {orderedMealsSummary.delivered.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No delivered meals yet.</p>
+                  ) : (
+                    orderedMealsSummary.delivered.slice(0, 8).map((row) => (
+                      <div key={`log-${getOrderedMealRowKey(row)}`} className="rounded-md border p-3">
+                        <p className="font-medium text-sm">{row.meal.meal_name}</p>
+                        <p className="text-sm text-muted-foreground">{row.fullName || "Unknown customer"}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {row.meal.scheduled_date || "-"}
+                          {row.meal.scheduled_time_slot ? `, ${row.meal.scheduled_time_slot}` : ""}
+                        </p>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="orders" className="space-y-6">
+            <div className="flex items-center gap-4 flex-wrap">
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="default">
+                    <Calendar className="w-4 h-4 mr-2" />
+                    {deliveryDateFilter ? `Delivery: ${format(deliveryDateFilter, "MMM dd, yyyy")}` : "All delivery dates"}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0" align="start">
+                  <CalendarComponent
+                    mode="single"
+                    selected={deliveryDateFilter}
+                    onSelect={(date) => date && setDeliveryDateFilter(date)}
+                    initialFocus
+                  />
+                </PopoverContent>
+              </Popover>
+
+              {deliveryDateFilter && (
+                <Button variant="ghost" onClick={() => setDeliveryDateFilter(undefined)}>
+                  Clear Delivery Date
+                </Button>
+              )}
+
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline">
+                    <Calendar className="w-4 h-4 mr-2" />
+                    {startDate ? format(startDate, "MMM dd, yyyy") : "Order Start Date"}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0" align="start">
+                  <CalendarComponent mode="single" selected={startDate} onSelect={setStartDate} initialFocus />
+                </PopoverContent>
+              </Popover>
+
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline">
+                    <Calendar className="w-4 h-4 mr-2" />
+                    {endDate ? format(endDate, "MMM dd, yyyy") : "Order End Date"}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0" align="start">
+                  <CalendarComponent mode="single" selected={endDate} onSelect={setEndDate} initialFocus />
+                </PopoverContent>
+              </Popover>
+            </div>
+
+            <div className="border rounded-lg">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Order #</TableHead>
+                    <TableHead>Customer</TableHead>
+                    <TableHead>Total Meals</TableHead>
+                    <TableHead>Payment</TableHead>
+                    <TableHead>Delivery Summary</TableHead>
+                    <TableHead>Date</TableHead>
+                    <TableHead>Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {loading ? (
+                    <TableRow>
+                      <TableCell colSpan={7} className="text-center py-8">
+                        Loading...
+                      </TableCell>
+                    </TableRow>
+                  ) : filteredOrders.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={7} className="text-center py-8">
+                        No orders found
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    filteredOrders.map((order) => (
+                      (() => {
+                        const customerName = getDeliveryContactName(
+                          order.delivery_address,
+                          `${order.profiles.first_name || ""} ${order.profiles.last_name || ""}`.trim(),
+                        );
+                        const customerPhone = getDeliveryContactPhone(
+                          order.delivery_address,
+                          order.profiles.phone_number || "-",
+                        );
+                        const activeMeals = order.meals.filter((meal) => meal.status !== "cancelled");
+                        const deliveredMeals = order.meals.filter((meal) => meal.status === "delivered");
+                        const nextMeal = activeMeals[0] || order.meals[0] || null;
+
+                        return (
+                          <TableRow
+                            key={order.id}
+                            className="cursor-pointer hover:bg-muted/50"
+                            onClick={() => {
+                              setSelectedOrder(order);
+                              setSheetOpen(true);
+                            }}
+                          >
+                            <TableCell className="font-medium">{order.order_number}</TableCell>
+                            <TableCell>
+                              <div>
+                                <p>{customerName || "Unknown customer"}</p>
+                                <p className="text-xs text-muted-foreground">{customerPhone || "-"}</p>
+                              </div>
+                            </TableCell>
+                            <TableCell>{order.meals.reduce((sum, meal) => sum + meal.quantity, 0)}</TableCell>
+                            <TableCell>
+                              <div className="space-y-2">
+                                <Badge variant={getPaymentBadgeVariant(order.payment_status)}>
+                                  {formatPaymentStatus(order.payment_status)}
+                                </Badge>
+                                <p className="text-xs text-muted-foreground">
+                                  ETB {order.total_amount.toLocaleString()}
+                                </p>
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              {nextMeal ? (
+                                <div className="space-y-1">
+                                  <p className="text-sm">
+                                    {nextMeal.scheduled_date || "No date"}
+                                    {nextMeal.scheduled_time_slot ? `, ${nextMeal.scheduled_time_slot}` : ""}
+                                  </p>
+                                  <p className="text-xs text-muted-foreground">
+                                    {activeMeals.reduce((sum, meal) => sum + meal.quantity, 0)} active,{" "}
+                                    {deliveredMeals.reduce((sum, meal) => sum + meal.quantity, 0)} delivered
+                                  </p>
+                                </div>
+                              ) : (
+                                <span className="text-muted-foreground">No structured meals yet</span>
+                              )}
+                            </TableCell>
+                            <TableCell>{new Date(order.created_at).toLocaleDateString()}</TableCell>
+                            <TableCell onClick={(e) => e.stopPropagation()}>
+                              <Select
+                                value={(order.status as OrderStatus) || "pending"}
+                                onValueChange={(value) => void updateOrderStatus(order.id, value)}
+                              >
+                                <SelectTrigger className="w-32">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="pending">Pending</SelectItem>
+                                  <SelectItem value="confirmed">Confirmed</SelectItem>
+                                  <SelectItem value="preparing">Preparing</SelectItem>
+                                  <SelectItem value="delivered">Delivered</SelectItem>
+                                  <SelectItem value="cancelled">Cancelled</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })()
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </TabsContent>
+        </Tabs>
+
+        <OrderDetailSheet open={sheetOpen} onOpenChange={setSheetOpen} order={selectedOrder} onUpdate={fetchOrders} />
+
+        <OrderCreateDialog open={createDialogOpen} onOpenChange={setCreateDialogOpen} onSuccess={fetchOrders} />
       </div>
     </DashboardLayout>
   );

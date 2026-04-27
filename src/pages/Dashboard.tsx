@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
@@ -7,6 +7,12 @@ import { RecentOrders } from "@/components/dashboard/RecentOrders";
 import { RevenueChart } from "@/components/dashboard/RevenueChart";
 import { Users, ShoppingBag, TrendingUp, UtensilsCrossed } from "lucide-react";
 import { getAdminAccess } from "@/lib/adminAuth";
+
+const isMissingOrderMealsTableError = (error: { code?: string; message?: string } | null | undefined) => {
+  if (!error) return false;
+
+  return error.code === "42P01" || error.message?.includes("order_meals") || false;
+};
 
 const Dashboard = () => {
   const navigate = useNavigate();
@@ -19,13 +25,7 @@ const Dashboard = () => {
   });
   const [revenueData, setRevenueData] = useState<{ name: string; revenue: number }[]>([]);
 
-  useEffect(() => {
-    checkAuth();
-    fetchStats();
-    fetchRevenueData();
-  }, []);
-
-  const checkAuth = async () => {
+  const checkAuth = useCallback(async () => {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) {
       navigate("/login");
@@ -38,32 +38,42 @@ const Dashboard = () => {
       await supabase.auth.signOut();
       navigate("/login");
     }
-  };
+  }, [navigate]);
 
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     try {
-      const [ordersRes, usersRes, mealsRes] = await Promise.all([
+      const [ordersRes, usersRes, orderMealsRes] = await Promise.all([
         supabase.from("orders").select("total_amount", { count: "exact" }),
         supabase.from("profiles").select("id", { count: "exact" }),
-        supabase.from("meals").select("id", { count: "exact" }),
+        supabase.from("order_meals").select("quantity"),
       ]);
 
       const totalRevenue = ordersRes.data?.reduce((sum, order) => sum + Number(order.total_amount), 0) || 0;
+      let totalMeals = orderMealsRes.data?.reduce((sum, meal) => sum + Number(meal.quantity || 0), 0) || 0;
+
+      if (orderMealsRes.error) {
+        if (!isMissingOrderMealsTableError(orderMealsRes.error)) {
+          throw orderMealsRes.error;
+        }
+
+        const mealsRes = await supabase.from("meals").select("id", { count: "exact" });
+        totalMeals = mealsRes.count || 0;
+      }
 
       setStats({
         totalOrders: ordersRes.count || 0,
         totalRevenue,
         activeUsers: usersRes.count || 0,
-        totalMeals: mealsRes.count || 0,
+        totalMeals,
       });
     } catch (error) {
       console.error("Error fetching stats:", error);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const fetchRevenueData = async () => {
+  const fetchRevenueData = useCallback(async () => {
     try {
       // Fetch orders from the last 6 months
       const sixMonthsAgo = new Date();
@@ -97,7 +107,13 @@ const Dashboard = () => {
     } catch (error) {
       console.error("Error fetching revenue data:", error);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    void checkAuth();
+    void fetchStats();
+    void fetchRevenueData();
+  }, [checkAuth, fetchStats, fetchRevenueData]);
 
   return (
     <DashboardLayout>
@@ -130,7 +146,7 @@ const Dashboard = () => {
             loading={loading}
           />
           <StatsCard
-            title="Total Meals"
+            title="Ordered Meals"
             value={stats.totalMeals}
             icon={UtensilsCrossed}
             trend="+5.4%"

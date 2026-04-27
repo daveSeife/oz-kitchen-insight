@@ -39,3 +39,60 @@ export const exportToCSV = (data: any[], filename: string, headers: string[]) =>
   link.click();
   document.body.removeChild(link);
 };
+
+export const exportToExcel = (
+  data: any[],
+  filename: string,
+  headers: string[],
+  headerLabels?: string[],
+) => {
+  if (data.length === 0) {
+    return;
+  }
+
+  const labels = headerLabels && headerLabels.length === headers.length ? headerLabels : headers;
+  const escapeHtml = (value: unknown) =>
+    String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+
+  const headerRow = labels.map((label) => `<th>${escapeHtml(label)}</th>`).join("");
+  const bodyRows = data
+    .map((row) => {
+      const cells = headers
+        .map((header) => `<td>${escapeHtml(row[header])}</td>`)
+        .join("");
+      return `<tr>${cells}</tr>`;
+    })
+    .join("");
+
+  const table = `
+    <html xmlns:o="urn:schemas-microsoft-com:office:office"
+          xmlns:x="urn:schemas-microsoft-com:office:excel"
+          xmlns="http://www.w3.org/TR/REC-html40">
+      <head>
+        <meta charset="utf-8" />
+      </head>
+      <body>
+        <table>
+          <thead><tr>${headerRow}</tr></thead>
+          <tbody>${bodyRows}</tbody>
+        </table>
+      </body>
+    </html>
+  `;
+
+  const blob = new Blob([table], { type: "application/vnd.ms-excel;charset=utf-8;" });
+  const link = document.createElement("a");
+  const url = URL.createObjectURL(blob);
+
+  link.setAttribute("href", url);
+  link.setAttribute("download", `${filename}_${new Date().toISOString().split("T")[0]}.xls`);
+  link.style.visibility = "hidden";
+
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+};

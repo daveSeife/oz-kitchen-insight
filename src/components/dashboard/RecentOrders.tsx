@@ -10,6 +10,8 @@ interface Order {
   total_amount: number;
   status: string;
   created_at: string;
+  mealCount: number;
+  nextSchedule: string;
 }
 
 export const RecentOrders = () => {
@@ -29,7 +31,56 @@ export const RecentOrders = () => {
         .limit(5);
 
       if (error) throw error;
-      setOrders(data || []);
+
+      const orderIds = (data || []).map((order) => order.id);
+      const { data: orderMealsData, error: orderMealsError } =
+        orderIds.length > 0
+          ? await supabase
+              .from("order_meals")
+              .select("order_id, quantity, scheduled_date, scheduled_time_slot, status")
+              .in("order_id", orderIds)
+          : { data: [], error: null };
+
+      const mealsByOrder = new Map<
+        string,
+        Array<{
+          quantity: number | null;
+          scheduled_date: string;
+          scheduled_time_slot: string;
+          status: string;
+        }>
+      >();
+
+      if (!orderMealsError) {
+        for (const meal of orderMealsData || []) {
+          const existing = mealsByOrder.get(meal.order_id) || [];
+          existing.push(meal);
+          mealsByOrder.set(meal.order_id, existing);
+        }
+      }
+
+      setOrders(
+        (data || []).map((order) => {
+          const meals = mealsByOrder.get(order.id) || [];
+          const activeMeals = meals
+            .filter((meal) => meal.status !== "cancelled")
+            .sort((left, right) =>
+              `${left.scheduled_date || ""}|${left.scheduled_time_slot || ""}`.localeCompare(
+                `${right.scheduled_date || ""}|${right.scheduled_time_slot || ""}`,
+              ),
+            );
+
+          const nextMeal = activeMeals[0];
+
+          return {
+            ...order,
+            mealCount: meals.reduce((sum, meal) => sum + Number(meal.quantity || 0), 0),
+            nextSchedule: nextMeal
+              ? `${nextMeal.scheduled_date}${nextMeal.scheduled_time_slot ? `, ${nextMeal.scheduled_time_slot}` : ""}`
+              : "No structured meals yet",
+          };
+        }),
+      );
     } catch (error) {
       console.error("Error fetching orders:", error);
     } finally {
@@ -81,6 +132,9 @@ export const RecentOrders = () => {
                 <p className="font-medium">{order.order_number}</p>
                 <p className="text-sm text-muted-foreground">
                   {new Date(order.created_at).toLocaleDateString()}
+                </p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {order.mealCount} meals - {order.nextSchedule}
                 </p>
               </div>
               <div className="flex items-center gap-4">

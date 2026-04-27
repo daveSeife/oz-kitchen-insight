@@ -417,6 +417,78 @@ export type Database = {
           },
         ]
       }
+      order_meals: {
+        Row: {
+          created_at: string | null
+          customer_note: string | null
+          dietary_tags: string[] | null
+          id: string
+          meal_category: string | null
+          meal_id: string | null
+          meal_name: string
+          meal_type: string
+          metadata: Json | null
+          order_id: string
+          quantity: number
+          scheduled_date: string
+          scheduled_time_slot: string
+          status: string
+          unit_price: number
+          updated_at: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          customer_note?: string | null
+          dietary_tags?: string[] | null
+          id?: string
+          meal_category?: string | null
+          meal_id?: string | null
+          meal_name: string
+          meal_type: string
+          metadata?: Json | null
+          order_id: string
+          quantity?: number
+          scheduled_date: string
+          scheduled_time_slot: string
+          status?: string
+          unit_price: number
+          updated_at?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          customer_note?: string | null
+          dietary_tags?: string[] | null
+          id?: string
+          meal_category?: string | null
+          meal_id?: string | null
+          meal_name?: string
+          meal_type?: string
+          metadata?: Json | null
+          order_id?: string
+          quantity?: number
+          scheduled_date?: string
+          scheduled_time_slot?: string
+          status?: string
+          unit_price?: number
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "order_meals_meal_id_fkey"
+            columns: ["meal_id"]
+            isOneToOne: false
+            referencedRelation: "meals"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "order_meals_order_id_fkey"
+            columns: ["order_id"]
+            isOneToOne: false
+            referencedRelation: "orders"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       orders: {
         Row: {
           created_at: string | null

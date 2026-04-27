@@ -7,11 +7,43 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { CheckCircle, AlertCircle } from "lucide-react";
+import {
+  formatAddressText,
+  getDeliveryContactName,
+  getDeliveryContactPhone,
+  getMealDayName,
+  normalizeDeliveryAddress,
+  type NormalizedOrderMeal,
+  sortNormalizedMeals,
+} from "@/lib/orderMeals";
+
+interface OrderDetailSheetOrder {
+  id: string;
+  order_number: string;
+  created_at: string;
+  status: string;
+  payment_status: string | null;
+  payment_method: string | null;
+  total_amount: number;
+  subtotal: number;
+  delivery_fee: number;
+  discount_amount: number;
+  notes: string | null;
+  delivery_date: string | null;
+  delivery_time_slot: string | null;
+  delivery_address: unknown;
+  profiles?: {
+    first_name?: string | null;
+    last_name?: string | null;
+    phone_number?: string | null;
+  };
+  meals: NormalizedOrderMeal[];
+}
 
 interface OrderDetailSheetProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  order: any;
+  order: OrderDetailSheetOrder | null;
   onUpdate?: () => void;
 }
 
@@ -60,7 +92,33 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
 
   if (!order) return null;
 
-  const items = order.items || order.meal_plans?.meal_plan_items;
+  const meals = sortNormalizedMeals(order.meals || []);
+  const deliveryAddress = normalizeDeliveryAddress(order.delivery_address);
+  const customerName = getDeliveryContactName(
+    order.delivery_address,
+    `${order.profiles?.first_name || ""} ${order.profiles?.last_name || ""}`.trim(),
+  );
+  const customerPhone = getDeliveryContactPhone(
+    order.delivery_address,
+    order.profiles?.phone_number || "",
+  );
+  const mealTotals = meals.reduce(
+    (summary: { total: number; remaining: number; delivered: number; cancelled: number }, meal) => {
+      const quantity = Number(meal.quantity || 0);
+      summary.total += quantity;
+
+      if (meal.status === "delivered") {
+        summary.delivered += quantity;
+      } else if (meal.status === "cancelled") {
+        summary.cancelled += quantity;
+      } else {
+        summary.remaining += quantity;
+      }
+
+      return summary;
+    },
+    { total: 0, remaining: 0, delivered: 0, cancelled: 0 },
+  );
 
   const getStatusColor = (status: string) => {
     const colors: Record<string, string> = {
@@ -131,8 +189,8 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
       setPaymentStatus(newStatus);
       toast.success(`Payment status updated to ${newStatus}`);
       onUpdate?.();
-    } catch (error: any) {
-      toast.error(error?.message || "Failed to update payment status");
+    } catch (error: unknown) {
+      toast.error(error instanceof Error ? error.message : "Failed to update payment status");
       console.error(error);
     } finally {
       setUpdating(false);
@@ -168,9 +226,10 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
           {/* Customer Information */}
           <div>
             <h4 className="font-medium mb-2">Customer</h4>
-            <p className="text-sm">
-              {order.profiles?.first_name} {order.profiles?.last_name}
-            </p>
+            <div className="text-sm space-y-1">
+              <p>{customerName || "Unknown customer"}</p>
+              {customerPhone && <p className="text-muted-foreground">{customerPhone}</p>}
+            </div>
           </div>
 
           <Separator />
@@ -181,33 +240,18 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
               <div>
                 <h4 className="font-medium mb-2">Delivery Address</h4>
                 <div className="text-sm space-y-1">
-                  {order.delivery_address.fullName && (
-                    <p className="font-medium">{order.delivery_address.fullName}</p>
+                  {deliveryAddress.contactName && (
+                    <p className="font-medium">{deliveryAddress.contactName}</p>
                   )}
-                  {order.delivery_address.phone && (
-                    <p>Phone: {order.delivery_address.phone}</p>
+                  {deliveryAddress.contactPhone && (
+                    <p>Phone: {deliveryAddress.contactPhone}</p>
                   )}
-                  {order.delivery_address.street?.street && (
-                    <p>{order.delivery_address.street.street}</p>
+                  {formatAddressText(order.delivery_address) && (
+                    <p>{formatAddressText(order.delivery_address)}</p>
                   )}
-                  {order.delivery_address.street?.city && (
-                    <p>{order.delivery_address.street.city}</p>
-                  )}
-                  {order.delivery_address.street?.zone && (
-                    <p>Zone: {order.delivery_address.street.zone}</p>
-                  )}
-                  {order.delivery_address.street?.building_number && (
-                    <p>Building: {order.delivery_address.street.building_number}</p>
-                  )}
-                  {order.delivery_address.street?.floor && (
-                    <p>Floor: {order.delivery_address.street.floor}</p>
-                  )}
-                  {order.delivery_address.street?.landmark && (
-                    <p>Landmark: {order.delivery_address.street.landmark}</p>
-                  )}
-                  {order.delivery_address.street?.special_instructions && (
+                  {deliveryAddress.specialInstructions && (
                     <p className="text-muted-foreground italic">
-                      {order.delivery_address.street.special_instructions}
+                      {deliveryAddress.specialInstructions}
                     </p>
                   )}
                 </div>
@@ -300,87 +344,74 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
 
           <Separator />
 
-          {/* Order Items */}
-          {items && items.length > 0 && (
+          {/* Ordered Meals */}
+          {meals.length > 0 && (
             <>
               <div>
-                <h4 className="font-medium mb-3">Order Items</h4>
+                <div className="flex items-center justify-between gap-3 mb-3">
+                  <h4 className="font-medium">Ordered Meals</h4>
+                  <Badge variant="outline">
+                    {mealTotals.total} total meals
+                  </Badge>
+                </div>
+                <div className="grid grid-cols-3 gap-3 mb-4">
+                  <div className="rounded-lg border p-3">
+                    <p className="text-xs text-muted-foreground">Remaining</p>
+                    <p className="text-lg font-semibold">{mealTotals.remaining}</p>
+                  </div>
+                  <div className="rounded-lg border p-3">
+                    <p className="text-xs text-muted-foreground">Delivered</p>
+                    <p className="text-lg font-semibold">{mealTotals.delivered}</p>
+                  </div>
+                  <div className="rounded-lg border p-3">
+                    <p className="text-xs text-muted-foreground">Cancelled</p>
+                    <p className="text-lg font-semibold">{mealTotals.cancelled}</p>
+                  </div>
+                </div>
                 <div className="space-y-3">
-                  {items.map((item: any) => (
-                    <div key={item.id} className="flex gap-3 p-3 border rounded-lg">
-                      {item.is_half_half || (item.half_meal_1 && item.half_meal_2) ? (
-                        <div className="flex-1">
-                          <div className="flex gap-2">
-                            <div className="flex items-center gap-2 flex-1">
-                              {item.half_meal_1?.image_url && (
-                                <img 
-                                  src={item.half_meal_1.image_url} 
-                                  alt={item.half_meal_1.name}
-                                  className="w-12 h-12 object-cover rounded"
-                                />
-                              )}
-                              <div className="flex-1">
-                                <p className="text-sm font-medium">{item.half_meal_1?.name}</p>
-                                <p className="text-xs text-muted-foreground">Half portion</p>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-2 flex-1">
-                              {item.half_meal_2?.image_url && (
-                                <img 
-                                  src={item.half_meal_2.image_url} 
-                                  alt={item.half_meal_2.name}
-                                  className="w-12 h-12 object-cover rounded"
-                                />
-                              )}
-                              <div className="flex-1">
-                                <p className="text-sm font-medium">{item.half_meal_2?.name}</p>
-                                <p className="text-xs text-muted-foreground">Half portion</p>
-                              </div>
-                            </div>
-                          </div>
-                          {item.delivery_date && (
-                            <p className="text-xs text-muted-foreground mt-2">
-                              Delivery: {new Date(item.delivery_date).toLocaleDateString('en-US', { 
-                                weekday: 'short', 
-                                month: 'short', 
-                                day: 'numeric' 
-                              })}
-                              {item.delivery_time_slot && ` (${item.delivery_time_slot})`}
-                            </p>
-                          )}
-                          <div className="flex justify-between items-center mt-1">
-                            <p className="text-sm">Qty: {item.quantity}</p>
-                            <p className="text-sm font-medium">ETB {item.unit_price?.toLocaleString?.() ?? item.unit_price}</p>
-                          </div>
+                  {meals.map((meal) => (
+                    <div
+                      key={`${meal.id}-${meal.source || "meal"}-${meal.scheduled_date}-${meal.scheduled_time_slot}`}
+                      className="p-3 border rounded-lg space-y-3"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="font-medium">{meal.meal_name}</p>
+                          <p className="text-sm text-muted-foreground capitalize">{meal.meal_type}</p>
                         </div>
-                      ) : (
-                        <>
-                          {item.meals?.image_url && (
-                            <img 
-                              src={item.meals.image_url} 
-                              alt={item.meals.name}
-                              className="w-16 h-16 object-cover rounded"
-                            />
-                          )}
-                          <div className="flex-1">
-                            <p className="font-medium">{item.meals?.name || 'Meal'}</p>
-                            <p className="text-sm text-muted-foreground capitalize">{item.meal_type}</p>
-                            {item.delivery_date && (
-                              <p className="text-xs text-muted-foreground mt-1">
-                                Delivery: {new Date(item.delivery_date).toLocaleDateString('en-US', { 
-                                  weekday: 'short', 
-                                  month: 'short', 
-                                  day: 'numeric' 
-                                })}
-                                {item.delivery_time_slot && ` (${item.delivery_time_slot})`}
-                              </p>
-                            )}
-                            <div className="flex justify-between items-center mt-1">
-                              <p className="text-sm">Qty: {item.quantity}</p>
-                              <p className="text-sm font-medium">ETB {item.unit_price?.toLocaleString?.() ?? item.unit_price}</p>
-                            </div>
-                          </div>
-                        </>
+                        <Badge variant="outline" className="capitalize">
+                          {meal.status}
+                        </Badge>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3 text-sm">
+                        <div>
+                          <p className="text-muted-foreground">Scheduled Date</p>
+                          <p>
+                            {meal.scheduled_date
+                              ? `${getMealDayName(meal.scheduled_date)}, ${new Date(meal.scheduled_date).toLocaleDateString()}`
+                              : "-"}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-muted-foreground">Scheduled Time</p>
+                          <p>{meal.scheduled_time_slot || "-"}</p>
+                        </div>
+                        <div>
+                          <p className="text-muted-foreground">Quantity</p>
+                          <p>{meal.quantity}</p>
+                        </div>
+                        <div>
+                          <p className="text-muted-foreground">Price Snapshot</p>
+                          <p>ETB {meal.unit_price?.toLocaleString?.() ?? meal.unit_price ?? 0}</p>
+                        </div>
+                      </div>
+
+                      {meal.customer_note && (
+                        <div>
+                          <p className="text-sm text-muted-foreground">Meal Notes</p>
+                          <p className="text-sm">{meal.customer_note}</p>
+                        </div>
                       )}
                     </div>
                   ))}
