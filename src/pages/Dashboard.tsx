@@ -10,7 +10,6 @@ import { getAdminAccess } from "@/lib/adminAuth";
 
 const isMissingOrderMealsTableError = (error: { code?: string; message?: string } | null | undefined) => {
   if (!error) return false;
-
   return error.code === "42P01" || error.message?.includes("order_meals") || false;
 };
 
@@ -31,9 +30,7 @@ const Dashboard = () => {
       navigate("/login");
       return;
     }
-
     const adminAccess = await getAdminAccess(session.user.id);
-
     if (!adminAccess.hasAccess) {
       await supabase.auth.signOut();
       navigate("/login");
@@ -47,25 +44,14 @@ const Dashboard = () => {
         supabase.from("profiles").select("id", { count: "exact" }),
         supabase.from("order_meals").select("quantity"),
       ]);
-
       const totalRevenue = ordersRes.data?.reduce((sum, order) => sum + Number(order.total_amount), 0) || 0;
       let totalMeals = orderMealsRes.data?.reduce((sum, meal) => sum + Number(meal.quantity || 0), 0) || 0;
-
       if (orderMealsRes.error) {
-        if (!isMissingOrderMealsTableError(orderMealsRes.error)) {
-          throw orderMealsRes.error;
-        }
-
+        if (!isMissingOrderMealsTableError(orderMealsRes.error)) throw orderMealsRes.error;
         const mealsRes = await supabase.from("meals").select("id", { count: "exact" });
         totalMeals = mealsRes.count || 0;
       }
-
-      setStats({
-        totalOrders: ordersRes.count || 0,
-        totalRevenue,
-        activeUsers: usersRes.count || 0,
-        totalMeals,
-      });
+      setStats({ totalOrders: ordersRes.count || 0, totalRevenue, activeUsers: usersRes.count || 0, totalMeals });
     } catch (error) {
       console.error("Error fetching stats:", error);
     } finally {
@@ -75,33 +61,25 @@ const Dashboard = () => {
 
   const fetchRevenueData = useCallback(async () => {
     try {
-      // Fetch orders from the last 6 months
       const sixMonthsAgo = new Date();
       sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-
       const { data: orders } = await supabase
         .from("orders")
         .select("created_at, total_amount")
         .gte("created_at", sixMonthsAgo.toISOString())
         .order("created_at", { ascending: true });
-
       if (orders) {
-        // Group by month
         const monthlyRevenue = new Map<string, number>();
-        
         orders.forEach((order) => {
           const date = new Date(order.created_at);
           const monthKey = date.toLocaleString('en-US', { month: 'short' });
           const current = monthlyRevenue.get(monthKey) || 0;
           monthlyRevenue.set(monthKey, current + Number(order.total_amount));
         });
-
-        // Convert to chart format
         const chartData = Array.from(monthlyRevenue.entries()).map(([name, revenue]) => ({
           name,
           revenue: Math.round(revenue),
         }));
-
         setRevenueData(chartData);
       }
     } catch (error) {
@@ -117,19 +95,20 @@ const Dashboard = () => {
 
   return (
     <DashboardLayout>
-      <div className="space-y-6">
-        <div>
-          <h1 className="text-3xl font-bold text-foreground">Dashboard</h1>
-          <p className="text-muted-foreground">Welcome back! Here's your overview.</p>
+      <div className="space-y-8">
+        <div className="page-header">
+          <h1 className="font-heading">Dashboard</h1>
+          <p className="text-muted-foreground mt-1">Welcome back! Here's your business overview.</p>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <StatsCard
             title="Total Orders"
             value={stats.totalOrders}
             icon={ShoppingBag}
             trend="+12.5%"
             loading={loading}
+            gradient="primary"
           />
           <StatsCard
             title="Total Revenue"
@@ -137,6 +116,7 @@ const Dashboard = () => {
             icon={TrendingUp}
             trend="+8.2%"
             loading={loading}
+            gradient="secondary"
           />
           <StatsCard
             title="Active Users"
@@ -144,6 +124,7 @@ const Dashboard = () => {
             icon={Users}
             trend="+23.1%"
             loading={loading}
+            gradient="emerald"
           />
           <StatsCard
             title="Ordered Meals"
@@ -151,10 +132,11 @@ const Dashboard = () => {
             icon={UtensilsCrossed}
             trend="+5.4%"
             loading={loading}
+            gradient="violet"
           />
         </div>
 
-        <div className="grid gap-6 md:grid-cols-2">
+        <div className="grid gap-6 lg:grid-cols-2">
           <RevenueChart data={revenueData} loading={loading} />
           <RecentOrders />
         </div>

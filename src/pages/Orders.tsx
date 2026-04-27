@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { format } from "date-fns";
-import { Calendar, CheckCircle2, Download, Plus, Search } from "lucide-react";
+import { Calendar, CheckCircle2, Download, Plus, Search, ShoppingBag } from "lucide-react";
+import { motion } from "framer-motion";
 import { toast } from "sonner";
 
 import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
@@ -858,18 +859,22 @@ const Orders = () => {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div>
-          <h1 className="text-3xl font-bold">Orders</h1>
-          <p className="text-muted-foreground">
+        <div className="page-header">
+          <h1 className="font-heading">Orders & Meals</h1>
+          <p className="text-muted-foreground mt-1">
             Orders remain the payment bundle, while ordered meals run daily delivery operations.
           </p>
         </div>
 
         <Tabs value={activeTab} onValueChange={setActiveTab}>
           <div className="flex items-center justify-between gap-4 flex-wrap">
-            <TabsList>
-              <TabsTrigger value="ordered-meals">Ordered Meals</TabsTrigger>
-              <TabsTrigger value="orders">Orders View</TabsTrigger>
+            <TabsList className="bg-muted/50 p-1">
+              <TabsTrigger value="ordered-meals" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm">
+                Ordered Meals
+              </TabsTrigger>
+              <TabsTrigger value="orders" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm">
+                Orders View
+              </TabsTrigger>
             </TabsList>
 
             <div className="flex items-center gap-3 flex-wrap">
@@ -883,24 +888,24 @@ const Orders = () => {
                   }
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  className="pl-10"
+                  className="pl-10 search-input"
                 />
               </div>
 
               {activeTab === "ordered-meals" ? (
-                <Button onClick={handleExportOrderedMeals} variant="outline">
+                <Button onClick={handleExportOrderedMeals} variant="outline" className="rounded-xl h-10">
                   <Download className="w-4 h-4 mr-2" />
                   Export Excel
                 </Button>
               ) : (
-                <Button onClick={handleExportOrders} variant="outline">
+                <Button onClick={handleExportOrders} variant="outline" className="rounded-xl h-10">
                   <Download className="w-4 h-4 mr-2" />
                   Export Orders
                 </Button>
               )}
 
               {isAdmin && (
-                <Button onClick={() => setCreateDialogOpen(true)}>
+                <Button onClick={() => setCreateDialogOpen(true)} className="rounded-xl h-10 px-4 font-semibold bg-gradient-to-r from-primary to-teal-700 shadow-lg shadow-primary/15">
                   <Plus className="w-4 h-4 mr-2" />
                   Add Order
                 </Button>
@@ -908,16 +913,16 @@ const Orders = () => {
             </div>
           </div>
 
-          <TabsContent value="ordered-meals" className="space-y-6">
+          <TabsContent value="ordered-meals" className="space-y-6 mt-6">
             <div className="flex items-center gap-3 flex-wrap">
               <Popover>
                 <PopoverTrigger asChild>
-                  <Button variant="outline">
+                  <Button variant="outline" className="rounded-xl h-10 bg-card">
                     <Calendar className="w-4 h-4 mr-2" />
                     {selectedMealDate ? format(selectedMealDate, "MMM dd, yyyy") : "All meal dates"}
                   </Button>
                 </PopoverTrigger>
-                <PopoverContent className="w-auto p-0" align="start">
+                <PopoverContent className="w-auto p-0 rounded-xl" align="start">
                   <CalendarComponent
                     mode="single"
                     selected={selectedMealDate}
@@ -928,20 +933,20 @@ const Orders = () => {
               </Popover>
 
               {selectedMealDate && (
-                <Button variant="ghost" onClick={() => setSelectedMealDate(undefined)}>
-                  Clear Meal Date
+                <Button variant="ghost" className="rounded-xl h-10 text-destructive hover:text-destructive hover:bg-destructive/10" onClick={() => setSelectedMealDate(undefined)}>
+                  Clear Date
                 </Button>
               )}
 
-              <Button variant="outline" onClick={() => setSelectedMealDate(new Date())}>
+              <Button variant="secondary" className="rounded-xl h-10" onClick={() => setSelectedMealDate(new Date())}>
                 Today's Deliveries
               </Button>
 
               <Select value={selectedTimeSlot} onValueChange={setSelectedTimeSlot}>
-                <SelectTrigger className="w-[180px]">
+                <SelectTrigger className="w-[180px] rounded-xl h-10 bg-card">
                   <SelectValue placeholder="Time slot" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className="rounded-xl">
                   <SelectItem value="all">All Times</SelectItem>
                   {timeSlotOptions.map((timeSlot) => (
                     <SelectItem key={timeSlot} value={timeSlot}>
@@ -952,10 +957,10 @@ const Orders = () => {
               </Select>
 
               <Select value={selectedMealType} onValueChange={setSelectedMealType}>
-                <SelectTrigger className="w-[180px]">
+                <SelectTrigger className="w-[180px] rounded-xl h-10 bg-card">
                   <SelectValue placeholder="Meal type" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className="rounded-xl">
                   <SelectItem value="all">All Meal Types</SelectItem>
                   <SelectItem value="fasting">Fasting</SelectItem>
                   <SelectItem value="non-fasting">Non-Fasting</SelectItem>
@@ -964,89 +969,98 @@ const Orders = () => {
             </div>
 
             <div className="grid gap-4 md:grid-cols-3">
-              <div className="rounded-lg border p-4">
-                <p className="text-sm text-muted-foreground">Remaining Meals</p>
-                <p className="text-3xl font-semibold">{orderedMealsSummary.remainingCount}</p>
-              </div>
-              <div className="rounded-lg border p-4">
-                <p className="text-sm text-muted-foreground">Delivered Meals</p>
-                <p className="text-3xl font-semibold">{orderedMealsSummary.deliveredCount}</p>
-              </div>
-              <div className="rounded-lg border p-4">
-                <p className="text-sm text-muted-foreground">Cancelled Meals</p>
-                <p className="text-3xl font-semibold">{orderedMealsSummary.cancelledCount}</p>
-              </div>
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
+                <p className="text-sm font-medium text-muted-foreground">Remaining Meals</p>
+                <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.remainingCount}</p>
+              </motion.div>
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.1 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
+                <p className="text-sm font-medium text-muted-foreground">Delivered Meals</p>
+                <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.deliveredCount}</p>
+              </motion.div>
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.2 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
+                <p className="text-sm font-medium text-muted-foreground">Cancelled Meals</p>
+                <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.cancelledCount}</p>
+              </motion.div>
             </div>
 
-            <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
-              <div className="border rounded-lg overflow-hidden">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Order #</TableHead>
-                      <TableHead>Full Name</TableHead>
-                      <TableHead>Phone</TableHead>
-                      <TableHead>Location</TableHead>
-                      <TableHead>Meal</TableHead>
-                      <TableHead>Qty</TableHead>
-                      <TableHead>Delivery Guy</TableHead>
-                      <TableHead>Notes</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {loading ? (
-                      <TableRow>
-                        <TableCell colSpan={8} className="text-center py-8">
-                          Loading...
+            <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_280px]">
+              <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.3 }} className="rounded-xl border border-border/50 bg-card shadow-card overflow-hidden">
+                <div className="overflow-x-auto">
+                  <Table className="modern-table min-w-[900px]">
+                    <TableHeader>
+                      <TableRow className="hover:bg-transparent border-border/50">
+                        <TableHead className="w-[90px]">Order #</TableHead>
+                        <TableHead className="min-w-[180px]">Customer</TableHead>
+                        <TableHead className="w-[120px]">Contact</TableHead>
+                        <TableHead className="min-w-[220px]">Meal Details</TableHead>
+                        <TableHead className="w-[60px]">Qty</TableHead>
+                        <TableHead className="min-w-[200px]">Status & Notes</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {loading ? (
+                        <TableRow>
+                          <TableCell colSpan={6} className="text-center py-12">
+                          <div className="flex flex-col items-center gap-3">
+                            <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+                            <p className="text-sm text-muted-foreground">Loading meals...</p>
+                          </div>
                         </TableCell>
                       </TableRow>
                     ) : filteredOrderedMeals.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={8} className="text-center py-8">
-                          No meals found for the selected filters
+                        <TableCell colSpan={6} className="text-center py-12">
+                          <div className="flex flex-col items-center gap-3">
+                            <ShoppingBag className="w-10 h-10 text-muted-foreground/30" />
+                            <p className="text-sm text-muted-foreground">No meals found</p>
+                          </div>
                         </TableCell>
                       </TableRow>
                     ) : (
                       filteredOrderedMeals.map((row) => (
-                        <TableRow key={getOrderedMealRowKey(row)}>
+                        <TableRow key={getOrderedMealRowKey(row)} className="border-border/50">
                           <TableCell className="font-mono text-xs">{row.order.order_number}</TableCell>
-                          <TableCell className="font-medium">{row.fullName || "-"}</TableCell>
-                          <TableCell>{row.phone || "-"}</TableCell>
-                          <TableCell className="max-w-[240px] whitespace-normal">{row.location || "-"}</TableCell>
                           <TableCell>
-                            <div className="space-y-2">
-                              <div className="font-medium">{row.meal.meal_name}</div>
+                            <p className="font-semibold text-foreground">{row.fullName || "-"}</p>
+                            <p className="text-xs text-muted-foreground max-w-[180px] truncate" title={row.location || ""}>{row.location || "-"}</p>
+                          </TableCell>
+                          <TableCell className="text-muted-foreground tabular-nums">{row.phone || "-"}</TableCell>
+                          <TableCell>
+                            <div className="space-y-1.5">
+                              <div className="font-semibold text-foreground">{row.meal.meal_name}</div>
                               <div className="text-xs text-muted-foreground">
-                                {getMealDayName(row.meal.scheduled_date) || "Unscheduled day"}
+                                {getMealDayName(row.meal.scheduled_date) || "Unscheduled"}
                                 {row.meal.scheduled_date ? `, ${row.meal.scheduled_date}` : ""}
-                                {row.meal.scheduled_time_slot ? `, ${row.meal.scheduled_time_slot}` : ""}
-                                {row.meal.quantity > 1 ? `, Qty ${row.meal.quantity}` : ""}
+                                {row.meal.scheduled_time_slot ? ` · ${row.meal.scheduled_time_slot}` : ""}
                               </div>
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <Badge variant="outline" className="capitalize">
+                              <div className="flex gap-1.5 flex-wrap pt-1">
+                                <span className="inline-flex items-center rounded-md bg-muted/70 px-2 py-0.5 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
                                   {row.meal.meal_type}
+                                </span>
+                                <Badge variant="outline" className={`text-[10px] border-0 ring-1 ring-inset ${row.meal.status === 'delivered' ? 'bg-emerald-50 text-emerald-700 ring-emerald-600/20' : 'bg-amber-50 text-amber-700 ring-amber-600/20'}`}>
+                                  {row.meal.status}
                                 </Badge>
-                                <Badge className={getMealStatusColor(row.meal.status)}>{row.meal.status}</Badge>
                               </div>
                             </div>
                           </TableCell>
-                          <TableCell>{row.meal.quantity}</TableCell>
-                          <TableCell />
-                          <TableCell className="min-w-[220px]">
+                          <TableCell className="font-semibold tabular-nums">{row.meal.quantity}</TableCell>
+                          <TableCell>
                             <div className="space-y-3">
-                              <p className="text-sm text-muted-foreground">
+                              <p className="text-sm text-muted-foreground line-clamp-2">
                                 {getMealNoteText(row.meal, row.order) || "-"}
                               </p>
-                              <label className="flex items-center gap-2 text-sm">
-                                <Checkbox
-                                  checked={row.meal.status === "delivered"}
-                                  disabled={updatingMealId === row.meal.id}
-                                  onCheckedChange={(checked) =>
-                                    void updateMealStatus(row.meal, row.order.id, checked ? "delivered" : "scheduled")
-                                  }
-                                />
-                                <span className="inline-flex items-center gap-1">
-                                  <CheckCircle2 className="w-4 h-4" />
+                              <label className="flex items-center gap-2 text-sm cursor-pointer group">
+                                <div className="relative flex items-center justify-center w-5 h-5">
+                                  <Checkbox
+                                    checked={row.meal.status === "delivered"}
+                                    disabled={updatingMealId === row.meal.id}
+                                    onCheckedChange={(checked) =>
+                                      void updateMealStatus(row.meal, row.order.id, checked ? "delivered" : "scheduled")
+                                    }
+                                    className="peer w-5 h-5 rounded-md border-muted-foreground/30 data-[state=checked]:bg-emerald-500 data-[state=checked]:border-emerald-500 transition-all"
+                                  />
+                                </div>
+                                <span className="font-medium text-foreground group-hover:text-emerald-600 transition-colors">
                                   Mark delivered
                                 </span>
                               </label>
@@ -1057,43 +1071,51 @@ const Orders = () => {
                     )}
                   </TableBody>
                 </Table>
-              </div>
+                </div>
+              </motion.div>
 
-              <div className="rounded-lg border p-4">
-                <h3 className="font-semibold">Delivery Log</h3>
+              <motion.div initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.3, delay: 0.4 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card h-fit sticky top-24">
+                <h3 className="font-heading font-bold text-lg">Delivery Log</h3>
                 <p className="text-sm text-muted-foreground mb-4">
-                  Delivered meals from the current filtered view.
+                  Delivered meals from the current view.
                 </p>
                 <div className="space-y-3">
                   {orderedMealsSummary.delivered.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">No delivered meals yet.</p>
+                    <div className="flex flex-col items-center justify-center py-6 text-center">
+                      <CheckCircle2 className="w-8 h-8 text-muted-foreground/20 mb-2" />
+                      <p className="text-sm text-muted-foreground">No delivered meals yet.</p>
+                    </div>
                   ) : (
                     orderedMealsSummary.delivered.slice(0, 8).map((row) => (
-                      <div key={`log-${getOrderedMealRowKey(row)}`} className="rounded-md border p-3">
-                        <p className="font-medium text-sm">{row.meal.meal_name}</p>
-                        <p className="text-sm text-muted-foreground">{row.fullName || "Unknown customer"}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {row.meal.scheduled_date || "-"}
-                          {row.meal.scheduled_time_slot ? `, ${row.meal.scheduled_time_slot}` : ""}
-                        </p>
+                      <div key={`log-${getOrderedMealRowKey(row)}`} className="rounded-xl border border-border/50 bg-muted/20 p-3 flex gap-3 items-start">
+                        <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center flex-shrink-0">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-semibold text-sm text-foreground truncate">{row.meal.meal_name}</p>
+                          <p className="text-xs text-muted-foreground truncate">{row.fullName || "Unknown"}</p>
+                          <p className="text-[10px] text-muted-foreground mt-1 tabular-nums">
+                            {row.meal.scheduled_time_slot || "Any time"}
+                          </p>
+                        </div>
                       </div>
                     ))
                   )}
                 </div>
-              </div>
+              </motion.div>
             </div>
           </TabsContent>
 
-          <TabsContent value="orders" className="space-y-6">
+          <TabsContent value="orders" className="space-y-6 mt-6">
             <div className="flex items-center gap-4 flex-wrap">
               <Popover>
                 <PopoverTrigger asChild>
-                  <Button variant="default">
+                  <Button variant="outline" className="rounded-xl h-10 bg-card">
                     <Calendar className="w-4 h-4 mr-2" />
                     {deliveryDateFilter ? `Delivery: ${format(deliveryDateFilter, "MMM dd, yyyy")}` : "All delivery dates"}
                   </Button>
                 </PopoverTrigger>
-                <PopoverContent className="w-auto p-0" align="start">
+                <PopoverContent className="w-auto p-0 rounded-xl" align="start">
                   <CalendarComponent
                     mode="single"
                     selected={deliveryDateFilter}
@@ -1104,60 +1126,67 @@ const Orders = () => {
               </Popover>
 
               {deliveryDateFilter && (
-                <Button variant="ghost" onClick={() => setDeliveryDateFilter(undefined)}>
-                  Clear Delivery Date
+                <Button variant="ghost" className="rounded-xl h-10 text-destructive hover:text-destructive hover:bg-destructive/10" onClick={() => setDeliveryDateFilter(undefined)}>
+                  Clear Filter
                 </Button>
               )}
 
               <Popover>
                 <PopoverTrigger asChild>
-                  <Button variant="outline">
+                  <Button variant="outline" className="rounded-xl h-10 bg-card">
                     <Calendar className="w-4 h-4 mr-2" />
                     {startDate ? format(startDate, "MMM dd, yyyy") : "Order Start Date"}
                   </Button>
                 </PopoverTrigger>
-                <PopoverContent className="w-auto p-0" align="start">
+                <PopoverContent className="w-auto p-0 rounded-xl" align="start">
                   <CalendarComponent mode="single" selected={startDate} onSelect={setStartDate} initialFocus />
                 </PopoverContent>
               </Popover>
 
               <Popover>
                 <PopoverTrigger asChild>
-                  <Button variant="outline">
+                  <Button variant="outline" className="rounded-xl h-10 bg-card">
                     <Calendar className="w-4 h-4 mr-2" />
                     {endDate ? format(endDate, "MMM dd, yyyy") : "Order End Date"}
                   </Button>
                 </PopoverTrigger>
-                <PopoverContent className="w-auto p-0" align="start">
+                <PopoverContent className="w-auto p-0 rounded-xl" align="start">
                   <CalendarComponent mode="single" selected={endDate} onSelect={setEndDate} initialFocus />
                 </PopoverContent>
               </Popover>
             </div>
 
-            <div className="border rounded-lg">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Order #</TableHead>
-                    <TableHead>Customer</TableHead>
-                    <TableHead>Total Meals</TableHead>
-                    <TableHead>Payment</TableHead>
-                    <TableHead>Delivery Summary</TableHead>
-                    <TableHead>Date</TableHead>
-                    <TableHead>Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
+            <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="rounded-xl border border-border/50 bg-card shadow-card overflow-hidden">
+              <div className="overflow-x-auto">
+                <Table className="modern-table min-w-[900px]">
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent border-border/50">
+                      <TableHead className="w-[100px]">Order #</TableHead>
+                      <TableHead className="min-w-[180px]">Customer</TableHead>
+                      <TableHead className="w-[100px]">Total Meals</TableHead>
+                      <TableHead className="min-w-[150px]">Payment</TableHead>
+                      <TableHead className="min-w-[200px]">Delivery Summary</TableHead>
+                      <TableHead className="w-[120px]">Date</TableHead>
+                      <TableHead className="w-[150px]">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
                 <TableBody>
                   {loading ? (
                     <TableRow>
-                      <TableCell colSpan={7} className="text-center py-8">
-                        Loading...
+                      <TableCell colSpan={7} className="text-center py-12">
+                        <div className="flex flex-col items-center gap-3">
+                          <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+                          <p className="text-sm text-muted-foreground">Loading orders...</p>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ) : filteredOrders.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={7} className="text-center py-8">
-                        No orders found
+                      <TableCell colSpan={7} className="text-center py-12">
+                        <div className="flex flex-col items-center gap-3">
+                          <ShoppingBag className="w-10 h-10 text-muted-foreground/30" />
+                          <p className="text-sm text-muted-foreground">No orders found</p>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ) : (
@@ -1178,26 +1207,26 @@ const Orders = () => {
                         return (
                           <TableRow
                             key={order.id}
-                            className="cursor-pointer hover:bg-muted/50"
+                            className="cursor-pointer hover:bg-muted/50 border-border/50 transition-colors"
                             onClick={() => {
                               setSelectedOrder(order);
                               setSheetOpen(true);
                             }}
                           >
-                            <TableCell className="font-medium">{order.order_number}</TableCell>
+                            <TableCell className="font-mono text-xs font-semibold">{order.order_number}</TableCell>
                             <TableCell>
                               <div>
-                                <p>{customerName || "Unknown customer"}</p>
-                                <p className="text-xs text-muted-foreground">{customerPhone || "-"}</p>
+                                <p className="font-semibold text-foreground">{customerName || "Unknown"}</p>
+                                <p className="text-xs text-muted-foreground tabular-nums">{customerPhone || "-"}</p>
                               </div>
                             </TableCell>
-                            <TableCell>{order.meals.reduce((sum, meal) => sum + meal.quantity, 0)}</TableCell>
+                            <TableCell className="font-semibold tabular-nums">{order.meals.reduce((sum, meal) => sum + meal.quantity, 0)}</TableCell>
                             <TableCell>
-                              <div className="space-y-2">
-                                <Badge variant={getPaymentBadgeVariant(order.payment_status)}>
+                              <div className="space-y-1.5">
+                                <Badge variant="outline" className={`text-[10px] border-0 ring-1 ring-inset ${order.payment_status === 'paid' ? 'bg-emerald-50 text-emerald-700 ring-emerald-600/20' : 'bg-amber-50 text-amber-700 ring-amber-600/20'}`}>
                                   {formatPaymentStatus(order.payment_status)}
                                 </Badge>
-                                <p className="text-xs text-muted-foreground">
+                                <p className="text-xs font-semibold text-foreground tabular-nums">
                                   ETB {order.total_amount.toLocaleString()}
                                 </p>
                               </div>
@@ -1205,29 +1234,29 @@ const Orders = () => {
                             <TableCell>
                               {nextMeal ? (
                                 <div className="space-y-1">
-                                  <p className="text-sm">
+                                  <p className="text-sm font-medium text-foreground">
                                     {nextMeal.scheduled_date || "No date"}
                                     {nextMeal.scheduled_time_slot ? `, ${nextMeal.scheduled_time_slot}` : ""}
                                   </p>
                                   <p className="text-xs text-muted-foreground">
-                                    {activeMeals.reduce((sum, meal) => sum + meal.quantity, 0)} active,{" "}
+                                    {activeMeals.reduce((sum, meal) => sum + meal.quantity, 0)} active ·{" "}
                                     {deliveredMeals.reduce((sum, meal) => sum + meal.quantity, 0)} delivered
                                   </p>
                                 </div>
                               ) : (
-                                <span className="text-muted-foreground">No structured meals yet</span>
+                                <span className="text-xs text-muted-foreground">No meals</span>
                               )}
                             </TableCell>
-                            <TableCell>{new Date(order.created_at).toLocaleDateString()}</TableCell>
+                            <TableCell className="text-muted-foreground tabular-nums">{new Date(order.created_at).toLocaleDateString()}</TableCell>
                             <TableCell onClick={(e) => e.stopPropagation()}>
                               <Select
                                 value={(order.status as OrderStatus) || "pending"}
                                 onValueChange={(value) => void updateOrderStatus(order.id, value)}
                               >
-                                <SelectTrigger className="w-32">
+                                <SelectTrigger className="w-32 h-8 rounded-lg text-xs bg-muted/30 border-border/50">
                                   <SelectValue />
                                 </SelectTrigger>
-                                <SelectContent>
+                                <SelectContent className="rounded-xl">
                                   <SelectItem value="pending">Pending</SelectItem>
                                   <SelectItem value="confirmed">Confirmed</SelectItem>
                                   <SelectItem value="preparing">Preparing</SelectItem>
@@ -1243,7 +1272,8 @@ const Orders = () => {
                   )}
                 </TableBody>
               </Table>
-            </div>
+              </div>
+            </motion.div>
           </TabsContent>
         </Tabs>
 
