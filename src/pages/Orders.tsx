@@ -41,7 +41,6 @@ import {
   formatAddressText,
   getDeliveryContactName,
   getDeliveryContactPhone,
-  getDeliverySpecialInstructions,
   getMealDayName,
   normalizeMealType,
   normalizeOrderMealRow,
@@ -103,21 +102,20 @@ const isMissingOrderMealsTableError = (error: { code?: string; message?: string;
   );
 };
 
-const getMealNoteText = (meal: NormalizedOrderMeal, order: Pick<Order, "delivery_address" | "notes">) => {
-  if (meal.customer_note?.trim()) return meal.customer_note.trim();
+const getMealNoteText = (meal: NormalizedOrderMeal) => {
+  const metadata = meal.metadata as Record<string, unknown> | null | undefined;
 
-  const specialInstructions = getDeliverySpecialInstructions(order.delivery_address);
-  if (specialInstructions.trim()) {
-    return specialInstructions.trim();
-  }
+  const noteCandidates = [
+    meal.customer_note,
+    typeof metadata?.customNote === "string" ? metadata.customNote : null,
+    typeof metadata?.specialRequest === "string" ? metadata.specialRequest : null,
+    typeof metadata?.notes === "string" ? metadata.notes : null,
+    typeof metadata?.special_instructions === "string" ? metadata.special_instructions : null,
+    typeof metadata?.note === "string" ? metadata.note : null,
+  ];
 
-  if (
-    typeof order.notes === "string" &&
-    order.notes.trim() &&
-    !order.notes.trim().startsWith("{") &&
-    !order.notes.trim().startsWith("[")
-  ) {
-    return order.notes.trim();
+  for (const candidate of noteCandidates) {
+    if (candidate?.trim()) return candidate.trim();
   }
 
   return "";
@@ -322,6 +320,7 @@ const Orders = () => {
   const [selectedTimeSlot, setSelectedTimeSlot] = useState("all");
   const [selectedMealType, setSelectedMealType] = useState("all");
   const [updatingMealId, setUpdatingMealId] = useState<string | null>(null);
+  const [selectedMealRowKeys, setSelectedMealRowKeys] = useState<string[]>([]);
 
   const formatPaymentStatus = (value?: string | null) => {
     if (!value) return "pending";
@@ -552,6 +551,7 @@ const Orders = () => {
     meal: NormalizedOrderMeal,
     orderId: string,
     nextStatus: "scheduled" | "delivered",
+    options?: { silent?: boolean; refetch?: boolean; throwOnError?: boolean },
   ) => {
     try {
       setUpdatingMealId(meal.id);
@@ -672,11 +672,22 @@ const Orders = () => {
         if (orderStatusError) throw orderStatusError;
       }
 
-      toast.success(nextStatus === "delivered" ? "Meal marked as delivered" : "Meal marked as scheduled");
-      void fetchOrders();
+      if (options?.refetch !== false) {
+        void fetchOrders();
+      }
+
+      if (!options?.silent) {
+        toast.success(nextStatus === "delivered" ? "Meal marked as delivered" : "Meal marked as scheduled");
+      }
+      return true;
     } catch (error) {
       console.error("[Orders] updateMealStatus error", error);
+      if (options?.throwOnError) {
+        throw error;
+      }
+
       toast.error("Failed to update meal status");
+      return false;
     } finally {
       setUpdatingMealId(null);
     }
@@ -800,6 +811,69 @@ const Orders = () => {
     };
   }, [filteredOrderedMeals]);
 
+  const filteredOrderedMealKeys = useMemo(
+    () => filteredOrderedMeals.map(getOrderedMealRowKey),
+    [filteredOrderedMeals],
+  );
+
+  const selectedOrderedMealRows = useMemo(
+    () => filteredOrderedMeals.filter((row) => selectedMealRowKeys.includes(getOrderedMealRowKey(row))),
+    [filteredOrderedMeals, selectedMealRowKeys],
+  );
+
+  const orderedMealsSelectionState = useMemo(() => {
+    const selectedVisibleCount = filteredOrderedMealKeys.filter((rowKey) =>
+      selectedMealRowKeys.includes(rowKey),
+    ).length;
+
+    return {
+      allSelected: filteredOrderedMealKeys.length > 0 && selectedVisibleCount === filteredOrderedMealKeys.length,
+      someSelected: selectedVisibleCount > 0 && selectedVisibleCount < filteredOrderedMealKeys.length,
+      selectedVisibleCount,
+    };
+  }, [filteredOrderedMealKeys, selectedMealRowKeys]);
+
+  const toggleMealRowSelection = (row: OrderedMealRow, checked: boolean) => {
+    const rowKey = getOrderedMealRowKey(row);
+
+    setSelectedMealRowKeys((current) =>
+      checked ? Array.from(new Set([...current, rowKey])) : current.filter((value) => value !== rowKey),
+    );
+  };
+
+  const toggleAllVisibleMeals = (checked: boolean) => {
+    setSelectedMealRowKeys((current) => {
+      if (checked) {
+        return Array.from(new Set([...current, ...filteredOrderedMealKeys]));
+      }
+
+      return current.filter((value) => !filteredOrderedMealKeys.includes(value));
+    });
+  };
+
+  const handleMarkSelectedDelivered = async () => {
+    if (selectedOrderedMealRows.length === 0) return;
+
+    try {
+      for (const row of selectedOrderedMealRows) {
+        await updateMealStatus(row.meal, row.order.id, "delivered", {
+          silent: true,
+          refetch: false,
+          throwOnError: true,
+        });
+      }
+
+      setSelectedMealRowKeys((current) =>
+        current.filter((value) => !selectedOrderedMealRows.some((row) => getOrderedMealRowKey(row) === value)),
+      );
+      toast.success("Selected meals marked as delivered");
+      void fetchOrders();
+    } catch (error) {
+      console.error("[Orders] handleMarkSelectedDelivered error", error);
+      toast.error("Failed to mark selected meals as delivered");
+    }
+  };
+
   const handleExportOrders = () => {
     const exportData = filteredOrders.map((order) => ({
       order_number: order.order_number,
@@ -844,7 +918,7 @@ const Orders = () => {
       meal: row.meal.meal_name,
       quantity: row.meal.quantity,
       delivery_guy: "",
-      notes: getMealNoteText(row.meal, row.order),
+      notes: getMealNoteText(row.meal),
     }));
 
     exportToExcel(
@@ -871,6 +945,9 @@ const Orders = () => {
             <TabsList className="bg-muted/50 p-1">
               <TabsTrigger value="ordered-meals" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm">
                 Ordered Meals
+              </TabsTrigger>
+              <TabsTrigger value="delivery-log" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm">
+                Delivery Log
               </TabsTrigger>
               <TabsTrigger value="orders" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm">
                 Orders View
@@ -966,6 +1043,16 @@ const Orders = () => {
                   <SelectItem value="non-fasting">Non-Fasting</SelectItem>
                 </SelectContent>
               </Select>
+
+              <Button
+                variant="secondary"
+                className="rounded-xl h-10"
+                onClick={() => void handleMarkSelectedDelivered()}
+                disabled={selectedOrderedMealRows.length === 0 || updatingMealId !== null}
+              >
+                <CheckCircle2 className="w-4 h-4 mr-2" />
+                Mark selected delivered ({selectedOrderedMealRows.length})
+              </Button>
             </div>
 
             <div className="grid gap-4 md:grid-cols-3">
@@ -983,42 +1070,64 @@ const Orders = () => {
               </motion.div>
             </div>
 
-            <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_280px]">
+            <div className="grid gap-6">
               <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.3 }} className="rounded-xl border border-border/50 bg-card shadow-card overflow-hidden">
                 <div className="overflow-x-auto">
                   <Table className="modern-table min-w-[900px]">
                     <TableHeader>
                       <TableRow className="hover:bg-transparent border-border/50">
+                        <TableHead className="w-[56px]">
+                          <Checkbox
+                            checked={
+                              orderedMealsSelectionState.allSelected
+                                ? true
+                                : orderedMealsSelectionState.someSelected
+                                  ? "indeterminate"
+                                  : false
+                            }
+                            onCheckedChange={(checked) => toggleAllVisibleMeals(Boolean(checked))}
+                            className="w-5 h-5 rounded-md border-muted-foreground/30 data-[state=checked]:bg-emerald-500 data-[state=checked]:border-emerald-500"
+                          />
+                        </TableHead>
                         <TableHead className="w-[90px]">Order #</TableHead>
                         <TableHead className="min-w-[180px]">Customer</TableHead>
                         <TableHead className="w-[120px]">Contact</TableHead>
                         <TableHead className="min-w-[220px]">Meal Details</TableHead>
                         <TableHead className="w-[60px]">Qty</TableHead>
-                        <TableHead className="min-w-[200px]">Status & Notes</TableHead>
+                        <TableHead className="min-w-[220px]">Notes</TableHead>
+                        <TableHead className="w-[140px]">Status</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {loading ? (
                         <TableRow>
-                          <TableCell colSpan={6} className="text-center py-12">
-                          <div className="flex flex-col items-center gap-3">
-                            <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
-                            <p className="text-sm text-muted-foreground">Loading meals...</p>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    ) : filteredOrderedMeals.length === 0 ? (
-                      <TableRow>
-                        <TableCell colSpan={6} className="text-center py-12">
-                          <div className="flex flex-col items-center gap-3">
-                            <ShoppingBag className="w-10 h-10 text-muted-foreground/30" />
-                            <p className="text-sm text-muted-foreground">No meals found</p>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    ) : (
-                      filteredOrderedMeals.map((row) => (
-                        <TableRow key={getOrderedMealRowKey(row)} className="border-border/50">
+                          <TableCell colSpan={8} className="text-center py-12">
+                            <div className="flex flex-col items-center gap-3">
+                              <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+                              <p className="text-sm text-muted-foreground">Loading meals...</p>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ) : filteredOrderedMeals.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={8} className="text-center py-12">
+                            <div className="flex flex-col items-center gap-3">
+                              <ShoppingBag className="w-10 h-10 text-muted-foreground/30" />
+                              <p className="text-sm text-muted-foreground">No meals found</p>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ) : (
+                        filteredOrderedMeals.map((row) => (
+                          <TableRow key={getOrderedMealRowKey(row)} className="border-border/50">
+                          <TableCell>
+                            <Checkbox
+                              checked={selectedMealRowKeys.includes(getOrderedMealRowKey(row))}
+                              disabled={updatingMealId === row.meal.id}
+                              onCheckedChange={(checked) => toggleMealRowSelection(row, Boolean(checked))}
+                              className="w-5 h-5 rounded-md border-muted-foreground/30 data-[state=checked]:bg-emerald-500 data-[state=checked]:border-emerald-500"
+                            />
+                          </TableCell>
                           <TableCell className="font-mono text-xs">{row.order.order_number}</TableCell>
                           <TableCell>
                             <p className="font-semibold text-foreground">{row.fullName || "-"}</p>
@@ -1045,65 +1154,86 @@ const Orders = () => {
                           </TableCell>
                           <TableCell className="font-semibold tabular-nums">{row.meal.quantity}</TableCell>
                           <TableCell>
-                            <div className="space-y-3">
-                              <p className="text-sm text-muted-foreground line-clamp-2">
-                                {getMealNoteText(row.meal, row.order) || "-"}
-                              </p>
-                              <label className="flex items-center gap-2 text-sm cursor-pointer group">
-                                <div className="relative flex items-center justify-center w-5 h-5">
-                                  <Checkbox
-                                    checked={row.meal.status === "delivered"}
-                                    disabled={updatingMealId === row.meal.id}
-                                    onCheckedChange={(checked) =>
-                                      void updateMealStatus(row.meal, row.order.id, checked ? "delivered" : "scheduled")
-                                    }
-                                    className="peer w-5 h-5 rounded-md border-muted-foreground/30 data-[state=checked]:bg-emerald-500 data-[state=checked]:border-emerald-500 transition-all"
-                                  />
-                                </div>
-                                <span className="font-medium text-foreground group-hover:text-emerald-600 transition-colors">
-                                  Mark delivered
-                                </span>
-                              </label>
-                            </div>
+                            <p className="text-sm text-muted-foreground line-clamp-2">
+                              {getMealNoteText(row.meal) || "-"}
+                            </p>
+                          </TableCell>
+                          <TableCell>
+                            <label className="flex items-center gap-2 text-sm cursor-pointer group">
+                              <div className="relative flex items-center justify-center w-5 h-5">
+                                <Checkbox
+                                  checked={row.meal.status === "delivered"}
+                                  disabled={updatingMealId === row.meal.id}
+                                  onCheckedChange={(checked) =>
+                                    void updateMealStatus(row.meal, row.order.id, checked ? "delivered" : "scheduled")
+                                  }
+                                  className="peer w-5 h-5 rounded-md border-muted-foreground/30 data-[state=checked]:bg-emerald-500 data-[state=checked]:border-emerald-500 transition-all"
+                                />
+                              </div>
+                              <span className="font-medium text-foreground group-hover:text-emerald-600 transition-colors">
+                                {row.meal.status === "delivered" ? "Delivered" : "Mark delivered"}
+                              </span>
+                            </label>
                           </TableCell>
                         </TableRow>
-                      ))
-                    )}
+                        ))
+                      )}
                   </TableBody>
                 </Table>
                 </div>
               </motion.div>
-
-              <motion.div initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.3, delay: 0.4 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card h-fit sticky top-24">
-                <h3 className="font-heading font-bold text-lg">Delivery Log</h3>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Delivered meals from the current view.
-                </p>
-                <div className="space-y-3">
-                  {orderedMealsSummary.delivered.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center py-6 text-center">
-                      <CheckCircle2 className="w-8 h-8 text-muted-foreground/20 mb-2" />
-                      <p className="text-sm text-muted-foreground">No delivered meals yet.</p>
-                    </div>
-                  ) : (
-                    orderedMealsSummary.delivered.slice(0, 8).map((row) => (
-                      <div key={`log-${getOrderedMealRowKey(row)}`} className="rounded-xl border border-border/50 bg-muted/20 p-3 flex gap-3 items-start">
-                        <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center flex-shrink-0">
-                          <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="font-semibold text-sm text-foreground truncate">{row.meal.meal_name}</p>
-                          <p className="text-xs text-muted-foreground truncate">{row.fullName || "Unknown"}</p>
-                          <p className="text-[10px] text-muted-foreground mt-1 tabular-nums">
-                            {row.meal.scheduled_time_slot || "Any time"}
-                          </p>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </motion.div>
             </div>
+          </TabsContent>
+
+          <TabsContent value="delivery-log" className="space-y-6 mt-6">
+            <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
+              <div className="flex items-start justify-between gap-4 flex-wrap mb-4">
+                <div>
+                  <h3 className="font-heading font-bold text-lg">Delivery Log</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Delivered meals from the current view, separated from the ordered meals table.
+                  </p>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-xl border border-border/50 bg-muted/20 p-3 min-w-[140px]">
+                    <p className="text-xs text-muted-foreground">Delivered</p>
+                    <p className="text-2xl font-heading font-bold">{orderedMealsSummary.deliveredCount}</p>
+                  </div>
+                  <div className="rounded-xl border border-border/50 bg-muted/20 p-3 min-w-[140px]">
+                    <p className="text-xs text-muted-foreground">Remaining</p>
+                    <p className="text-2xl font-heading font-bold">{orderedMealsSummary.remainingCount}</p>
+                  </div>
+                  <div className="rounded-xl border border-border/50 bg-muted/20 p-3 min-w-[140px]">
+                    <p className="text-xs text-muted-foreground">Cancelled</p>
+                    <p className="text-2xl font-heading font-bold">{orderedMealsSummary.cancelledCount}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                {orderedMealsSummary.delivered.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-10 text-center">
+                    <CheckCircle2 className="w-8 h-8 text-muted-foreground/20 mb-2" />
+                    <p className="text-sm text-muted-foreground">No delivered meals yet.</p>
+                  </div>
+                ) : (
+                  orderedMealsSummary.delivered.map((row) => (
+                    <div key={`log-${getOrderedMealRowKey(row)}`} className="rounded-xl border border-border/50 bg-muted/20 p-3 flex gap-3 items-start">
+                      <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center flex-shrink-0">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="font-semibold text-sm text-foreground truncate">{row.meal.meal_name}</p>
+                        <p className="text-xs text-muted-foreground truncate">{row.fullName || "Unknown"}</p>
+                        <p className="text-[10px] text-muted-foreground mt-1 tabular-nums">
+                          {row.meal.scheduled_date || "No date"}{row.meal.scheduled_time_slot ? ` · ${row.meal.scheduled_time_slot}` : ""}
+                        </p>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </motion.div>
           </TabsContent>
 
           <TabsContent value="orders" className="space-y-6 mt-6">

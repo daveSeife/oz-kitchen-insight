@@ -9,6 +9,7 @@ interface StatsCardProps {
   trend?: string;
   loading?: boolean;
   gradient?: "primary" | "secondary" | "emerald" | "violet";
+  onClick?: () => void;
 }
 
 const gradientClasses: Record<string, { bg: string; icon: string; iconBg: string }> = {
@@ -34,7 +35,7 @@ const gradientClasses: Record<string, { bg: string; icon: string; iconBg: string
   },
 };
 
-export const StatsCard = ({ title, value, icon: Icon, trend, loading, gradient = "primary" }: StatsCardProps) => {
+export const StatsCard = ({ title, value, icon: Icon, trend, loading, gradient = "primary", onClick }: StatsCardProps) => {
   const colors = gradientClasses[gradient] || gradientClasses.primary;
 
   if (loading) {
@@ -57,7 +58,19 @@ export const StatsCard = ({ title, value, icon: Icon, trend, loading, gradient =
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, ease: [0.33, 1, 0.68, 1] }}
     >
-      <Card className={`overflow-hidden border-border/50 shadow-card card-hover ${colors.bg}`}>
+      <Card
+        role={onClick ? "button" : undefined}
+        tabIndex={onClick ? 0 : undefined}
+        onClick={onClick}
+        onKeyDown={(event) => {
+          if (!onClick) return;
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onClick();
+          }
+        }}
+        className={`overflow-hidden border-border/50 shadow-card ${onClick ? "card-hover cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2" : ""} ${colors.bg}`}
+      >
         <CardContent className="p-6">
           <div className="flex items-start justify-between">
             <div className="space-y-2">
