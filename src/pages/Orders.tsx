@@ -483,10 +483,10 @@ const Orders = () => {
       };
 
       const normalizedOrders: Order[] = (ordersData || []).map((order) => {
-        const orderMeals = (mealsByOrder.get(order.id) || []).map(enrichMeal);
+        const structuredMeals = (mealsByOrder.get(order.id) || []).map(enrichMeal);
         const fallbackMeals = (fallbackMealsByOrder.get(order.id) || []).map(enrichMeal);
 
-        const meals = dedupeMeals([...orderMeals, ...fallbackMeals]).sort((a, b) => {
+        const meals = (structuredMeals.length > 0 ? structuredMeals : dedupeMeals(fallbackMeals)).sort((a, b) => {
           const left = `${a.scheduled_date || ""} ${a.scheduled_time_slot || ""}`;
           const right = `${b.scheduled_date || ""} ${b.scheduled_time_slot || ""}`;
           return left.localeCompare(right);
