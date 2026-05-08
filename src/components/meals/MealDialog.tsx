@@ -10,12 +10,31 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { toast } from "sonner";
 import { Upload, X } from "lucide-react";
 
+const WEEKDAY_OPTIONS = [
+  { value: "monday", label: "Mon" },
+  { value: "tuesday", label: "Tue" },
+  { value: "wednesday", label: "Wed" },
+  { value: "thursday", label: "Thu" },
+  { value: "friday", label: "Fri" },
+  { value: "saturday", label: "Sat" },
+  { value: "sunday", label: "Sun" },
+];
+
 interface MealDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   meal: any | null;
   onSuccess: () => void;
 }
+
+const readAvailabilityDays = (meal: any) => {
+  const schedule = meal?.availability_schedule;
+  if (schedule && typeof schedule === "object" && Array.isArray(schedule.days)) {
+    return schedule.days.filter((day: unknown): day is string => typeof day === "string");
+  }
+
+  return [];
+};
 
 export const MealDialog = ({ open, onOpenChange, meal, onSuccess }: MealDialogProps) => {
   const [formData, setFormData] = useState({
@@ -25,9 +44,12 @@ export const MealDialog = ({ open, onOpenChange, meal, onSuccess }: MealDialogPr
     category_id: "",
     is_available: true,
     is_chefs_choice: false,
+    is_special_meal: false,
     image_url: "",
     dietary_tags: "",
     ingredients: "",
+    availability_days: [] as string[],
+    max_order_per_customer: "",
   });
   const [loading, setLoading] = useState(false);
   const [imageFile, setImageFile] = useState<File | null>(null);
@@ -47,9 +69,12 @@ export const MealDialog = ({ open, onOpenChange, meal, onSuccess }: MealDialogPr
         category_id: meal.category_id || "",
         is_available: meal.is_available ?? true,
         is_chefs_choice: meal.is_chefs_choice ?? false,
+        is_special_meal: meal.is_special_meal ?? false,
         image_url: meal.image_url || "",
         dietary_tags: meal.dietary_tags?.join(", ") || "",
         ingredients: meal.ingredients?.join(", ") || "",
+        availability_days: readAvailabilityDays(meal),
+        max_order_per_customer: meal.max_order_per_customer?.toString() || "",
       });
       setImagePreview(meal.image_url || null);
     } else {
@@ -60,9 +85,12 @@ export const MealDialog = ({ open, onOpenChange, meal, onSuccess }: MealDialogPr
         category_id: "",
         is_available: true,
         is_chefs_choice: false,
+        is_special_meal: false,
         image_url: "",
         dietary_tags: "",
         ingredients: "",
+        availability_days: [],
+        max_order_per_customer: "",
       });
       setImagePreview(null);
     }
@@ -135,6 +163,7 @@ export const MealDialog = ({ open, onOpenChange, meal, onSuccess }: MealDialogPr
         category_id: formData.category_id || null,
         is_available: formData.is_available,
         is_chefs_choice: formData.is_chefs_choice,
+        is_special_meal: formData.is_special_meal,
         image_url: imageUrl,
         dietary_tags: formData.dietary_tags
           ? formData.dietary_tags.split(",").map((tag) => tag.trim())
@@ -142,6 +171,15 @@ export const MealDialog = ({ open, onOpenChange, meal, onSuccess }: MealDialogPr
         ingredients: formData.ingredients
           ? formData.ingredients.split(",").map((ing) => ing.trim())
           : null,
+        availability_schedule: formData.is_special_meal
+          ? {
+              days: formData.availability_days,
+              time_slots: ["lunch"],
+            }
+          : meal?.availability_schedule || null,
+        max_order_per_customer: formData.is_special_meal && formData.max_order_per_customer
+          ? parseInt(formData.max_order_per_customer, 10)
+          : meal?.max_order_per_customer ?? null,
       };
 
       if (meal) {
@@ -244,7 +282,77 @@ export const MealDialog = ({ open, onOpenChange, meal, onSuccess }: MealDialogPr
                   }
                 />
               </div>
+              <div className="space-y-2">
+                <Label htmlFor="is_special_meal">Special Meal</Label>
+                <div className="flex items-center h-10">
+                  <Switch
+                    id="is_special_meal"
+                    checked={formData.is_special_meal}
+                    onCheckedChange={(checked) =>
+                      setFormData((current) => ({
+                        ...current,
+                        is_special_meal: checked,
+                        availability_days:
+                          checked && current.availability_days.length === 0
+                            ? ["monday", "tuesday", "wednesday", "thursday", "friday"]
+                            : checked
+                            ? current.availability_days
+                            : [],
+                        max_order_per_customer: current.max_order_per_customer,
+                      }))
+                    }
+                  />
+                </div>
+              </div>
             </div>
+
+            {formData.is_special_meal && (
+              <div className="space-y-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
+                <div className="space-y-2">
+                  <Label>Available Days</Label>
+                  <div className="flex flex-wrap gap-2">
+                    {WEEKDAY_OPTIONS.map((day) => {
+                      const checked = formData.availability_days.includes(day.value);
+
+                      return (
+                        <button
+                          type="button"
+                          key={day.value}
+                          onClick={() =>
+                            setFormData((current) => ({
+                              ...current,
+                              availability_days: checked
+                                ? current.availability_days.filter((value) => value !== day.value)
+                                : [...current.availability_days, day.value],
+                            }))
+                          }
+                          className={`rounded-full px-3 py-1.5 text-xs font-semibold ring-1 transition ${
+                            checked
+                              ? "bg-amber-500 text-white ring-amber-500"
+                              : "bg-white text-amber-900 ring-amber-200 hover:bg-amber-100"
+                          }`}
+                        >
+                          {day.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="max_order_per_customer">Max Order Per Customer</Label>
+                  <Input
+                    id="max_order_per_customer"
+                    type="number"
+                    min="1"
+                    step="1"
+                    placeholder="e.g. 1"
+                    value={formData.max_order_per_customer}
+                    onChange={(e) => setFormData({ ...formData, max_order_per_customer: e.target.value })}
+                  />
+                </div>
+              </div>
+            )}
           </div>
           <div className="space-y-2">
             <Label>Meal Image</Label>

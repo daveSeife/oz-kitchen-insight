@@ -14,6 +14,9 @@ interface Meal {
   id: string; name: string; description: string; base_price: number;
   is_available: boolean; is_chefs_choice: boolean; category_id: string;
   image_url: string; dietary_tags: string[];
+  is_special_meal?: boolean;
+  max_order_per_customer?: number | null;
+  availability_schedule?: { days?: string[]; time_slots?: string[] } | null;
 }
 
 interface Category { id: string; name: string; description: string; }
@@ -171,11 +174,21 @@ const Meals = () => {
                         <span className={`status-badge ${meal.is_available ? 'status-active' : 'status-cancelled'}`}>
                           {meal.is_available ? "Available" : "Unavailable"}
                         </span>
+                        {meal.is_special_meal && (
+                          <span className="status-badge bg-amber-100 text-amber-900 ring-1 ring-inset ring-amber-200">
+                            Special Meal
+                          </span>
+                        )}
                         {meal.is_chefs_choice && (
                           <span className="status-badge bg-primary/10 text-primary ring-1 ring-inset ring-primary/20">
                             Chef's Choice
                           </span>
                         )}
+                        {meal.max_order_per_customer ? (
+                          <span className="status-badge bg-slate-100 text-slate-700 ring-1 ring-inset ring-slate-200">
+                            Limit {meal.max_order_per_customer}
+                          </span>
+                        ) : null}
                       </div>
                     </TableCell>
                     <TableCell className="hidden lg:table-cell">
@@ -185,6 +198,11 @@ const Meals = () => {
                             {tag}
                           </span>
                         ))}
+                        {meal.is_special_meal && meal.availability_schedule?.days?.length ? (
+                          <span className="inline-flex items-center rounded-md bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-800 ring-1 ring-inset ring-amber-200">
+                            {meal.availability_schedule.days.join(", ")}
+                          </span>
+                        ) : null}
                       </div>
                     </TableCell>
                     <TableCell className="text-right">
