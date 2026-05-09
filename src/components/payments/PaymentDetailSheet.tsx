@@ -169,7 +169,7 @@ export const PaymentDetailSheet = ({ open, onOpenChange, payment, onUpdate }: Pa
                   className="w-full"
                 >
                   <CheckCircle className="w-4 h-4 mr-2" />
-                  {updating ? "Confirming..." : "Confirm 75% Upfront Payment"}
+                  {updating ? "Confirming..." : "Confirm"}
                 </Button>
               )}
 
@@ -180,7 +180,7 @@ export const PaymentDetailSheet = ({ open, onOpenChange, payment, onUpdate }: Pa
                   className="w-full"
                 >
                   <CheckCircle className="w-4 h-4 mr-2" />
-                  {updating ? "Confirming..." : "Confirm Remaining 25% Payment"}
+                  {updating ? "Confirming..." : "Confirm"}
                 </Button>
               )}
 
