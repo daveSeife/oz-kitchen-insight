@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { getAdminAccess } from "@/lib/adminAuth";
 import { motion } from "framer-motion";
+import { UserDetailSheet } from "@/components/users/UserDetailSheet";
 
 interface Profile {
   id: string; first_name: string; last_name: string; phone_number: string;
@@ -21,6 +22,8 @@ const Users = () => {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [currentUserIsSuperAdmin, setCurrentUserIsSuperAdmin] = useState(false);
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+  const [detailsSheetOpen, setDetailsSheetOpen] = useState(false);
 
   useEffect(() => {
     checkSuperAdmin();
@@ -78,6 +81,11 @@ const Users = () => {
     user.phone_number?.toLowerCase().includes(search.toLowerCase())
   );
 
+  const handleUserRowClick = (userId: string) => {
+    setSelectedUserId(userId);
+    setDetailsSheetOpen(true);
+  };
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
@@ -128,7 +136,11 @@ const Users = () => {
                 </TableRow>
               ) : (
                 filteredUsers.map((user) => (
-                  <TableRow key={user.id} className="border-border/50">
+                  <TableRow 
+                    key={user.id} 
+                    className="border-border/50 cursor-pointer hover:bg-muted/50 transition-colors"
+                    onClick={() => handleUserRowClick(user.id)}
+                  >
                     <TableCell>
                       <div className="flex items-center gap-3">
                         <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
@@ -161,7 +173,7 @@ const Users = () => {
                     {currentUserIsSuperAdmin && (
                       <TableCell>
                         <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
+                          <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
                             <Button variant="ghost" size="icon" className="h-8 w-8 rounded-lg text-muted-foreground">
                               <MoreVertical className="w-4 h-4" />
                             </Button>
@@ -179,6 +191,14 @@ const Users = () => {
             </TableBody>
           </Table>
         </motion.div>
+
+        {selectedUserId && (
+          <UserDetailSheet
+            open={detailsSheetOpen}
+            onOpenChange={setDetailsSheetOpen}
+            userId={selectedUserId}
+          />
+        )}
       </div>
     </DashboardLayout>
   );
