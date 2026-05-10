@@ -1,6 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { format } from "date-fns";
-import { Calendar, CheckCircle2, Download, Plus, Search, ShoppingBag } from "lucide-react";
+import {
+  AlertTriangle,
+  Calendar,
+  CheckCircle2,
+  Clock3,
+  Download,
+  MoreVertical,
+  Plus,
+  RotateCcw,
+  Search,
+  ShoppingBag,
+  Wallet,
+  XCircle,
+} from "lucide-react";
 import { motion } from "framer-motion";
 import { toast } from "sonner";
 
@@ -11,7 +24,22 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Calendar as CalendarComponent } from "@/components/ui/calendar";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Popover,
   PopoverContent,
@@ -33,6 +61,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 import { supabase } from "@/integrations/supabase/client";
 import type { Tables } from "@/integrations/supabase/types";
 import { getAdminAccess } from "@/lib/adminAuth";
@@ -42,10 +71,12 @@ import {
   getDeliveryContactName,
   getDeliveryContactPhone,
   getMealDayName,
+  type NormalizedMealRecoveryAction,
   normalizeMealType,
   normalizeOrderMealRow,
   parseLegacyMealSnapshot,
   type NormalizedOrderMeal,
+  type NormalizedOrderMealStatus,
 } from "@/lib/orderMeals";
 
 type OrderStatus = "pending" | "confirmed" | "preparing" | "delivered" | "cancelled";
@@ -90,6 +121,8 @@ interface LatestPaymentRecord {
   payment_gateway_response: unknown;
   created_at: string;
 }
+
+type MealAdminAction = "missed" | "rescheduled" | "cancelled" | "refunded";
 
 const isMissingOrderMealsTableError = (error: { code?: string; message?: string; hint?: string } | null | undefined) => {
   if (!error) return false;
@@ -287,15 +320,33 @@ const getOrderedMealRowKey = (row: OrderedMealRow) => `${row.order.id}::${getMea
 const getMealQuantityTotal = (rows: OrderedMealRow[]) =>
   rows.reduce((sum, row) => sum + (row.meal.quantity || 0), 0);
 
+const isPaymentConfirmed = (paymentStatus?: string | null) =>
+  paymentStatus === "paid" || paymentStatus === "partial" || paymentStatus === "completed";
+
+const isInactiveMealStatus = (status: NormalizedOrderMealStatus) =>
+  status === "cancelled" || status === "refunded";
+
+const isRecoveryMealStatus = (status: NormalizedOrderMealStatus) =>
+  status === "missed" || status === "rescheduled" || status === "modified";
+
 const deriveOrderStatusFromMeals = (meals: NormalizedOrderMeal[], currentStatus?: string | null): OrderStatus => {
   if (meals.length === 0) {
     return (currentStatus as OrderStatus) || "pending";
   }
 
-  const activeMeals = meals.filter((meal) => meal.status !== "cancelled");
+  const activeMeals = meals.filter((meal) => !isInactiveMealStatus(meal.status));
   if (activeMeals.length === 0) return "cancelled";
   if (activeMeals.every((meal) => meal.status === "delivered")) return "delivered";
-  if (activeMeals.some((meal) => meal.status === "delivered")) return "preparing";
+  if (
+    activeMeals.some((meal) =>
+      meal.status === "delivered" ||
+      meal.status === "missed" ||
+      meal.status === "rescheduled" ||
+      meal.status === "modified",
+    )
+  ) {
+    return "preparing";
+  }
 
   if (currentStatus === "pending" || currentStatus === "confirmed" || currentStatus === "preparing") {
     return currentStatus;
@@ -321,6 +372,14 @@ const Orders = () => {
   const [selectedMealType, setSelectedMealType] = useState("all");
   const [updatingMealId, setUpdatingMealId] = useState<string | null>(null);
   const [selectedMealRowKeys, setSelectedMealRowKeys] = useState<string[]>([]);
+  const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
+  const [recoveryTargetRow, setRecoveryTargetRow] = useState<OrderedMealRow | null>(null);
+  const [recoveryAction, setRecoveryAction] = useState<MealAdminAction>("missed");
+  const [recoveryDate, setRecoveryDate] = useState("");
+  const [recoveryTimeSlot, setRecoveryTimeSlot] = useState("");
+  const [recoveryReason, setRecoveryReason] = useState("");
+  const [recoveryNotes, setRecoveryNotes] = useState("");
+  const [recoveryRefundAmount, setRecoveryRefundAmount] = useState("");
 
   const formatPaymentStatus = (value?: string | null) => {
     if (!value) return "pending";
@@ -328,20 +387,49 @@ const Orders = () => {
     return value;
   };
 
-  const getPaymentBadgeVariant = (value?: string | null): "default" | "secondary" | "destructive" => {
-    if (value === "paid") return "default";
-    if (value === "failed") return "destructive";
-    return "secondary";
+  const getPaymentStatusTone = (value?: string | null) => {
+    if (value === "paid" || value === "partial" || value === "completed") {
+      return "bg-emerald-50 text-emerald-700 ring-emerald-600/20";
+    }
+
+    if (value === "failed" || value === "refunded") {
+      return "bg-rose-50 text-rose-700 ring-rose-600/20";
+    }
+
+    return "bg-amber-50 text-amber-700 ring-amber-600/20";
   };
 
   const getMealStatusColor = (status: string) => {
     const colors: Record<string, string> = {
       scheduled: "bg-amber-100 text-amber-800",
       modified: "bg-sky-100 text-sky-800",
+      missed: "bg-orange-100 text-orange-800",
+      rescheduled: "bg-cyan-100 text-cyan-800",
       delivered: "bg-emerald-100 text-emerald-800",
       cancelled: "bg-rose-100 text-rose-800",
+      refunded: "bg-slate-100 text-slate-800",
     };
     return colors[status] || "bg-gray-100 text-gray-800";
+  };
+
+  const getMealRecoveryLabel = (meal: NormalizedOrderMeal) => {
+    if (meal.status === "refunded") {
+      return meal.refund_amount ? `Refunded ETB ${meal.refund_amount.toLocaleString()}` : "Refunded";
+    }
+
+    if (meal.status === "rescheduled") {
+      return `Rescheduled to ${meal.scheduled_date || "-"}${meal.scheduled_time_slot ? `, ${meal.scheduled_time_slot}` : ""}`;
+    }
+
+    if (meal.status === "missed") {
+      return meal.recovery_reason || "Missed delivery under review";
+    }
+
+    if (meal.status === "cancelled") {
+      return meal.recovery_reason || "Cancelled";
+    }
+
+    return null;
   };
 
   const checkAdminStatus = useCallback(async () => {
@@ -537,6 +625,16 @@ const Orders = () => {
 
   const updateOrderStatus = async (orderId: string, newStatus: string) => {
     try {
+      const targetOrder = orders.find((order) => order.id === orderId);
+      if (
+        targetOrder &&
+        ["confirmed", "preparing", "delivered"].includes(newStatus) &&
+        !isPaymentConfirmed(targetOrder.payment_status)
+      ) {
+        toast.error("Confirm payment before moving this order into fulfilment.");
+        return;
+      }
+
       const { error } = await supabase.from("orders").update({ status: newStatus }).eq("id", orderId);
 
       if (error) throw error;
@@ -547,14 +645,25 @@ const Orders = () => {
     }
   };
 
-  const updateMealStatus = async (
+  const updateMealRecord = async (
     meal: NormalizedOrderMeal,
-    orderId: string,
-    nextStatus: "scheduled" | "delivered",
+    order: Order,
+    updates: Partial<Tables<"order_meals">> & {
+      status?: NormalizedOrderMealStatus;
+      recovery_action?: NormalizedMealRecoveryAction | null;
+    },
+    successMessage: string,
     options?: { silent?: boolean; refetch?: boolean; throwOnError?: boolean },
   ) => {
     try {
       setUpdatingMealId(meal.id);
+
+      if (
+        (updates.status === "delivered" || updates.status === "missed" || updates.status === "rescheduled") &&
+        !isPaymentConfirmed(order.payment_status)
+      ) {
+        throw new Error("Confirm payment before progressing this meal.");
+      }
 
       const sourceRefs = getMealSourceRefs(meal);
       if (sourceRefs.length === 0) {
@@ -568,7 +677,7 @@ const Orders = () => {
       if (orderMealIds.length > 0) {
         const response = await supabase
           .from("order_meals")
-          .update({ status: nextStatus })
+          .update(updates)
           .in("id", orderMealIds);
 
         if (response.error) throw response.error;
@@ -614,7 +723,7 @@ const Orders = () => {
 
           snapshotRoot[snapshotIndex] = {
             ...(snapshotItem as Record<string, unknown>),
-            status: nextStatus,
+            ...updates,
           };
         }
 
@@ -634,7 +743,7 @@ const Orders = () => {
       const refreshedOrderMealsResponse = await supabase
         .from("order_meals")
         .select("*")
-        .eq("order_id", orderId);
+        .eq("order_id", order.id);
 
       let nextOrderStatus: OrderStatus | null = null;
 
@@ -642,7 +751,7 @@ const Orders = () => {
         const refreshedMeals = ((refreshedOrderMealsResponse.data as OrderMealRowRecord[] | null) || []).map((row) =>
           normalizeOrderMealRow(row),
         );
-        nextOrderStatus = deriveOrderStatusFromMeals(refreshedMeals);
+        nextOrderStatus = deriveOrderStatusFromMeals(refreshedMeals, order.status);
       } else if (isMissingOrderMealsTableError(refreshedOrderMealsResponse.error)) {
         const legacyPaymentRefs = Array.from(legacyRefsByPayment.keys());
         const paymentRecordId = legacyPaymentRefs[0] || null;
@@ -656,8 +765,8 @@ const Orders = () => {
 
           if (paymentFetchError) throw paymentFetchError;
 
-          const legacyMeals = parseLegacyMealSnapshot(orderId, paymentRecord?.payment_gateway_response);
-          nextOrderStatus = deriveOrderStatusFromMeals(legacyMeals);
+          const legacyMeals = parseLegacyMealSnapshot(order.id, paymentRecord?.payment_gateway_response);
+          nextOrderStatus = deriveOrderStatusFromMeals(legacyMeals, order.status);
         }
       } else {
         throw refreshedOrderMealsResponse.error;
@@ -667,7 +776,7 @@ const Orders = () => {
         const { error: orderStatusError } = await supabase
           .from("orders")
           .update({ status: nextOrderStatus })
-          .eq("id", orderId);
+          .eq("id", order.id);
 
         if (orderStatusError) throw orderStatusError;
       }
@@ -677,7 +786,7 @@ const Orders = () => {
       }
 
       if (!options?.silent) {
-        toast.success(nextStatus === "delivered" ? "Meal marked as delivered" : "Meal marked as scheduled");
+        toast.success(successMessage);
       }
       return true;
     } catch (error) {
@@ -691,6 +800,27 @@ const Orders = () => {
     } finally {
       setUpdatingMealId(null);
     }
+  };
+
+  const updateMealStatus = async (
+    meal: NormalizedOrderMeal,
+    order: Order,
+    nextStatus: "scheduled" | "delivered",
+    options?: { silent?: boolean; refetch?: boolean; throwOnError?: boolean },
+  ) => {
+    return updateMealRecord(
+      meal,
+      order,
+      {
+        status: nextStatus,
+        recovery_action: nextStatus === "scheduled" ? "none" : meal.recovery_action,
+        recovery_reason: nextStatus === "scheduled" ? null : meal.recovery_reason,
+        recovery_notes: nextStatus === "scheduled" ? null : meal.recovery_notes,
+        refund_amount: nextStatus === "scheduled" ? null : meal.refund_amount,
+      },
+      nextStatus === "delivered" ? "Meal marked as delivered" : "Meal returned to scheduled",
+      options,
+    );
   };
 
   const filteredOrders = useMemo(() => {
@@ -797,16 +927,22 @@ const Orders = () => {
   const orderedMealsSummary = useMemo(() => {
     const delivered = filteredOrderedMeals.filter((row) => row.meal.status === "delivered");
     const remaining = filteredOrderedMeals.filter(
-      (row) => row.meal.status !== "delivered" && row.meal.status !== "cancelled",
+      (row) =>
+        row.meal.status !== "delivered" &&
+        !isInactiveMealStatus(row.meal.status) &&
+        !isRecoveryMealStatus(row.meal.status),
     );
-    const cancelled = filteredOrderedMeals.filter((row) => row.meal.status === "cancelled");
+    const recovery = filteredOrderedMeals.filter((row) => isRecoveryMealStatus(row.meal.status));
+    const cancelled = filteredOrderedMeals.filter((row) => isInactiveMealStatus(row.meal.status));
 
     return {
       delivered,
       remaining,
+      recovery,
       cancelled,
       deliveredCount: getMealQuantityTotal(delivered),
       remainingCount: getMealQuantityTotal(remaining),
+      recoveryCount: getMealQuantityTotal(recovery),
       cancelledCount: getMealQuantityTotal(cancelled),
     };
   }, [filteredOrderedMeals]);
@@ -854,9 +990,15 @@ const Orders = () => {
   const handleMarkSelectedDelivered = async () => {
     if (selectedOrderedMealRows.length === 0) return;
 
+    const blockedMeals = selectedOrderedMealRows.filter((row) => !isPaymentConfirmed(row.order.payment_status));
+    if (blockedMeals.length > 0) {
+      toast.error("Some selected meals cannot be delivered until payment is confirmed.");
+      return;
+    }
+
     try {
       for (const row of selectedOrderedMealRows) {
-        await updateMealStatus(row.meal, row.order.id, "delivered", {
+        await updateMealStatus(row.meal, row.order, "delivered", {
           silent: true,
           refetch: false,
           throwOnError: true,
@@ -871,6 +1013,124 @@ const Orders = () => {
     } catch (error) {
       console.error("[Orders] handleMarkSelectedDelivered error", error);
       toast.error("Failed to mark selected meals as delivered");
+    }
+  };
+
+  const openRecoveryDialog = (row: OrderedMealRow, action: MealAdminAction = "missed") => {
+    setRecoveryTargetRow(row);
+    setRecoveryAction(action);
+    setRecoveryDate(row.meal.scheduled_date || "");
+    setRecoveryTimeSlot(row.meal.scheduled_time_slot || "");
+    setRecoveryReason(row.meal.recovery_reason || "");
+    setRecoveryNotes(row.meal.recovery_notes || "");
+    setRecoveryRefundAmount(
+      row.meal.refund_amount !== null && row.meal.refund_amount !== undefined
+        ? String(row.meal.refund_amount)
+        : String(row.meal.quantity * row.meal.unit_price),
+    );
+    setRecoveryDialogOpen(true);
+  };
+
+  const resetRecoveryDialog = () => {
+    setRecoveryDialogOpen(false);
+    setRecoveryTargetRow(null);
+    setRecoveryAction("missed");
+    setRecoveryDate("");
+    setRecoveryTimeSlot("");
+    setRecoveryReason("");
+    setRecoveryNotes("");
+    setRecoveryRefundAmount("");
+  };
+
+  const handleApplyRecoveryAction = async () => {
+    if (!recoveryTargetRow) return;
+
+    const { meal, order } = recoveryTargetRow;
+    const baseUpdates: Partial<Tables<"order_meals">> & {
+      status?: NormalizedOrderMealStatus;
+      recovery_action?: NormalizedMealRecoveryAction | null;
+    } = {
+      recovery_reason: recoveryReason.trim() || null,
+      recovery_notes: recoveryNotes.trim() || null,
+      original_scheduled_date: meal.original_scheduled_date || meal.scheduled_date || null,
+      original_scheduled_time_slot: meal.original_scheduled_time_slot || meal.scheduled_time_slot || null,
+    };
+
+    try {
+      if (recoveryAction === "missed") {
+        await updateMealRecord(
+          meal,
+          order,
+          {
+            ...baseUpdates,
+            status: "missed",
+            recovery_action: "missed",
+          },
+          "Meal marked as missed for follow-up",
+          { throwOnError: true },
+        );
+      }
+
+      if (recoveryAction === "rescheduled") {
+        if (!recoveryDate || !recoveryTimeSlot.trim()) {
+          toast.error("Choose the new delivery date and time slot before rescheduling.");
+          return;
+        }
+
+        await updateMealRecord(
+          meal,
+          order,
+          {
+            ...baseUpdates,
+            status: "rescheduled",
+            recovery_action: "rescheduled",
+            scheduled_date: recoveryDate,
+            scheduled_time_slot: recoveryTimeSlot.trim(),
+          },
+          "Meal rescheduled successfully",
+          { throwOnError: true },
+        );
+      }
+
+      if (recoveryAction === "cancelled") {
+        await updateMealRecord(
+          meal,
+          order,
+          {
+            ...baseUpdates,
+            status: "cancelled",
+            recovery_action: "cancelled",
+          },
+          "Meal cancelled",
+          { throwOnError: true },
+        );
+      }
+
+      if (recoveryAction === "refunded") {
+        const parsedRefundAmount = Number(recoveryRefundAmount);
+        if (Number.isNaN(parsedRefundAmount) || parsedRefundAmount < 0) {
+          toast.error("Enter a valid refund amount.");
+          return;
+        }
+
+        await updateMealRecord(
+          meal,
+          order,
+          {
+            ...baseUpdates,
+            status: "refunded",
+            recovery_action: "refunded",
+            refund_amount: parsedRefundAmount,
+          },
+          "Meal marked for refund handling",
+          { throwOnError: true },
+        );
+      }
+
+      resetRecoveryDialog();
+    } catch (error) {
+      console.error("[Orders] handleApplyRecoveryAction error", error);
+      toast.error(error instanceof Error ? error.message : "Failed to update meal recovery action");
     }
   };
 
@@ -1055,9 +1315,9 @@ const Orders = () => {
               </Button>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-3">
+            <div className="grid gap-4 md:grid-cols-4">
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
-                <p className="text-sm font-medium text-muted-foreground">Remaining Meals</p>
+                <p className="text-sm font-medium text-muted-foreground">Scheduled Meals</p>
                 <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.remainingCount}</p>
               </motion.div>
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.1 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
@@ -1065,7 +1325,11 @@ const Orders = () => {
                 <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.deliveredCount}</p>
               </motion.div>
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.2 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
-                <p className="text-sm font-medium text-muted-foreground">Cancelled Meals</p>
+                <p className="text-sm font-medium text-muted-foreground">Recovery Queue</p>
+                <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.recoveryCount}</p>
+              </motion.div>
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.3 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
+                <p className="text-sm font-medium text-muted-foreground">Cancelled / Refunded</p>
                 <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.cancelledCount}</p>
               </motion.div>
             </div>
@@ -1146,10 +1410,15 @@ const Orders = () => {
                                 <span className="inline-flex items-center rounded-md bg-muted/70 px-2 py-0.5 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
                                   {row.meal.meal_type}
                                 </span>
-                                <Badge variant="outline" className={`text-[10px] border-0 ring-1 ring-inset ${row.meal.status === 'delivered' ? 'bg-emerald-50 text-emerald-700 ring-emerald-600/20' : 'bg-amber-50 text-amber-700 ring-amber-600/20'}`}>
+                                <Badge variant="outline" className={`text-[10px] border-0 ring-1 ring-inset ${getMealStatusColor(row.meal.status)}`}>
                                   {row.meal.status}
                                 </Badge>
                               </div>
+                              {getMealRecoveryLabel(row.meal) && (
+                                <p className="text-[11px] text-muted-foreground">
+                                  {getMealRecoveryLabel(row.meal)}
+                                </p>
+                              )}
                             </div>
                           </TableCell>
                           <TableCell className="font-semibold tabular-nums">{row.meal.quantity}</TableCell>
@@ -1159,21 +1428,77 @@ const Orders = () => {
                             </p>
                           </TableCell>
                           <TableCell>
-                            <label className="flex items-center gap-2 text-sm cursor-pointer group">
-                              <div className="relative flex items-center justify-center w-5 h-5">
-                                <Checkbox
-                                  checked={row.meal.status === "delivered"}
-                                  disabled={updatingMealId === row.meal.id}
-                                  onCheckedChange={(checked) =>
-                                    void updateMealStatus(row.meal, row.order.id, checked ? "delivered" : "scheduled")
-                                  }
-                                  className="peer w-5 h-5 rounded-md border-muted-foreground/30 data-[state=checked]:bg-emerald-500 data-[state=checked]:border-emerald-500 transition-all"
-                                />
-                              </div>
-                              <span className="font-medium text-foreground group-hover:text-emerald-600 transition-colors">
-                                {row.meal.status === "delivered" ? "Delivered" : "Mark delivered"}
-                              </span>
-                            </label>
+                            <div className="space-y-2">
+                              <Button
+                                type="button"
+                                size="sm"
+                                className="w-full justify-center rounded-lg font-semibold bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white shadow-sm"
+                                disabled={updatingMealId === row.meal.id || !isPaymentConfirmed(row.order.payment_status)}
+                                onClick={() => void updateMealStatus(row.meal, row.order, "delivered")}
+                              >
+                                <CheckCircle2 className="w-4 h-4 mr-2" />
+                                Delivered
+                              </Button>
+
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    className="w-full justify-center rounded-lg"
+                                    disabled={updatingMealId === row.meal.id}
+                                  >
+                                    <MoreVertical className="w-4 h-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end" className="w-48">
+                                  <DropdownMenuItem
+                                    onClick={() => openRecoveryDialog(row, "rescheduled")}
+                                    disabled={updatingMealId === row.meal.id}
+                                  >
+                                    <Clock3 className="w-4 h-4 mr-2" />
+                                    Reschedule
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => openRecoveryDialog(row, "missed")}
+                                    disabled={updatingMealId === row.meal.id}
+                                  >
+                                    <AlertTriangle className="w-4 h-4 mr-2" />
+                                    Mark as Missed
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => openRecoveryDialog(row, "cancelled")}
+                                    disabled={updatingMealId === row.meal.id}
+                                  >
+                                    <XCircle className="w-4 h-4 mr-2" />
+                                    Cancel
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => openRecoveryDialog(row, "refunded")}
+                                    disabled={updatingMealId === row.meal.id}
+                                  >
+                                    <Wallet className="w-4 h-4 mr-2" />
+                                    Refund
+                                  </DropdownMenuItem>
+                                  {row.meal.status !== "scheduled" && (
+                                    <DropdownMenuItem
+                                      onClick={() => void updateMealStatus(row.meal, row.order, "scheduled")}
+                                      disabled={updatingMealId === row.meal.id}
+                                    >
+                                      <RotateCcw className="w-4 h-4 mr-2" />
+                                      Reset to Scheduled
+                                    </DropdownMenuItem>
+                                  )}
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+
+                              {!isPaymentConfirmed(row.order.payment_status) && (
+                                <p className="text-[10px] text-amber-600 text-center mt-1 px-2 py-1 bg-amber-50 rounded">
+                                  ⚠️ Payment pending
+                                </p>
+                              )}
+                            </div>
                           </TableCell>
                         </TableRow>
                         ))
@@ -1194,17 +1519,21 @@ const Orders = () => {
                     Delivered meals from the current view, separated from the ordered meals table.
                   </p>
                 </div>
-                <div className="grid gap-3 sm:grid-cols-3">
+                <div className="grid gap-3 sm:grid-cols-4">
                   <div className="rounded-xl border border-border/50 bg-muted/20 p-3 min-w-[140px]">
                     <p className="text-xs text-muted-foreground">Delivered</p>
                     <p className="text-2xl font-heading font-bold">{orderedMealsSummary.deliveredCount}</p>
                   </div>
                   <div className="rounded-xl border border-border/50 bg-muted/20 p-3 min-w-[140px]">
-                    <p className="text-xs text-muted-foreground">Remaining</p>
+                    <p className="text-xs text-muted-foreground">Scheduled</p>
                     <p className="text-2xl font-heading font-bold">{orderedMealsSummary.remainingCount}</p>
                   </div>
                   <div className="rounded-xl border border-border/50 bg-muted/20 p-3 min-w-[140px]">
-                    <p className="text-xs text-muted-foreground">Cancelled</p>
+                    <p className="text-xs text-muted-foreground">Recovery Queue</p>
+                    <p className="text-2xl font-heading font-bold">{orderedMealsSummary.recoveryCount}</p>
+                  </div>
+                  <div className="rounded-xl border border-border/50 bg-muted/20 p-3 min-w-[140px]">
+                    <p className="text-xs text-muted-foreground">Cancelled / Refunded</p>
                     <p className="text-2xl font-heading font-bold">{orderedMealsSummary.cancelledCount}</p>
                   </div>
                 </div>
@@ -1330,7 +1659,7 @@ const Orders = () => {
                           order.delivery_address,
                           order.profiles.phone_number || "-",
                         );
-                        const activeMeals = order.meals.filter((meal) => meal.status !== "cancelled");
+                        const activeMeals = order.meals.filter((meal) => !isInactiveMealStatus(meal.status));
                         const deliveredMeals = order.meals.filter((meal) => meal.status === "delivered");
                         const nextMeal = activeMeals[0] || order.meals[0] || null;
 
@@ -1353,7 +1682,7 @@ const Orders = () => {
                             <TableCell className="font-semibold tabular-nums">{order.meals.reduce((sum, meal) => sum + meal.quantity, 0)}</TableCell>
                             <TableCell>
                               <div className="space-y-1.5">
-                                <Badge variant="outline" className={`text-[10px] border-0 ring-1 ring-inset ${order.payment_status === 'paid' ? 'bg-emerald-50 text-emerald-700 ring-emerald-600/20' : 'bg-amber-50 text-amber-700 ring-amber-600/20'}`}>
+                                <Badge variant="outline" className={`text-[10px] border-0 ring-1 ring-inset ${getPaymentStatusTone(order.payment_status)}`}>
                                   {formatPaymentStatus(order.payment_status)}
                                 </Badge>
                                 <p className="text-xs font-semibold text-foreground tabular-nums">
@@ -1406,6 +1735,109 @@ const Orders = () => {
             </motion.div>
           </TabsContent>
         </Tabs>
+
+        <Dialog open={recoveryDialogOpen} onOpenChange={(open) => (open ? setRecoveryDialogOpen(true) : resetRecoveryDialog())}>
+          <DialogContent className="sm:max-w-lg">
+            <DialogHeader>
+              <DialogTitle>Meal Recovery Handling</DialogTitle>
+              <DialogDescription>
+                Record the recovery action for missed or incorrectly handled meals.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-4">
+              <div className="rounded-xl border border-border/50 bg-muted/20 p-3 text-sm">
+                <p className="font-semibold">{recoveryTargetRow?.meal.meal_name || "Meal"}</p>
+                <p className="text-muted-foreground">
+                  {recoveryTargetRow?.order.order_number || "-"}
+                  {recoveryTargetRow?.meal.scheduled_date ? ` · ${recoveryTargetRow.meal.scheduled_date}` : ""}
+                  {recoveryTargetRow?.meal.scheduled_time_slot ? ` · ${recoveryTargetRow.meal.scheduled_time_slot}` : ""}
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="recovery-action">Recovery action</Label>
+                <Select value={recoveryAction} onValueChange={(value) => setRecoveryAction(value as MealAdminAction)}>
+                  <SelectTrigger id="recovery-action">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="missed">Mark as missed</SelectItem>
+                    <SelectItem value="rescheduled">Reschedule delivery</SelectItem>
+                    <SelectItem value="cancelled">Cancel meal</SelectItem>
+                    <SelectItem value="refunded">Refund meal</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {recoveryAction === "rescheduled" && (
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="recovery-date">New date</Label>
+                    <Input
+                      id="recovery-date"
+                      type="date"
+                      value={recoveryDate}
+                      onChange={(event) => setRecoveryDate(event.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="recovery-time">New time slot</Label>
+                    <Input
+                      id="recovery-time"
+                      value={recoveryTimeSlot}
+                      onChange={(event) => setRecoveryTimeSlot(event.target.value)}
+                      placeholder="e.g. Lunch 12:00 - 14:00"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {recoveryAction === "refunded" && (
+                <div className="space-y-2">
+                  <Label htmlFor="recovery-refund">Refund amount</Label>
+                  <Input
+                    id="recovery-refund"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={recoveryRefundAmount}
+                    onChange={(event) => setRecoveryRefundAmount(event.target.value)}
+                  />
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <Label htmlFor="recovery-reason">Reason</Label>
+                <Input
+                  id="recovery-reason"
+                  value={recoveryReason}
+                  onChange={(event) => setRecoveryReason(event.target.value)}
+                  placeholder="Admin delivery miss, kitchen issue, customer unreachable..."
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="recovery-notes">Notes</Label>
+                <Textarea
+                  id="recovery-notes"
+                  value={recoveryNotes}
+                  onChange={(event) => setRecoveryNotes(event.target.value)}
+                  placeholder="Add the recovery/refund context for the operations team."
+                />
+              </div>
+            </div>
+
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={resetRecoveryDialog}>
+                Close
+              </Button>
+              <Button type="button" onClick={() => void handleApplyRecoveryAction()}>
+                Save Recovery Action
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         <OrderDetailSheet open={sheetOpen} onOpenChange={setSheetOpen} order={selectedOrder} onUpdate={fetchOrders} />
 

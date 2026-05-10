@@ -434,8 +434,14 @@ export type Database = {
           meal_name: string
           meal_type: string
           metadata: Json | null
+          original_scheduled_date: string | null
+          original_scheduled_time_slot: string | null
           order_id: string
           quantity: number
+          recovery_action: string | null
+          recovery_notes: string | null
+          recovery_reason: string | null
+          refund_amount: number | null
           scheduled_date: string
           scheduled_time_slot: string
           status: string
@@ -452,8 +458,14 @@ export type Database = {
           meal_name: string
           meal_type: string
           metadata?: Json | null
+          original_scheduled_date?: string | null
+          original_scheduled_time_slot?: string | null
           order_id: string
           quantity?: number
+          recovery_action?: string | null
+          recovery_notes?: string | null
+          recovery_reason?: string | null
+          refund_amount?: number | null
           scheduled_date: string
           scheduled_time_slot: string
           status?: string
@@ -470,8 +482,14 @@ export type Database = {
           meal_name?: string
           meal_type?: string
           metadata?: Json | null
+          original_scheduled_date?: string | null
+          original_scheduled_time_slot?: string | null
           order_id?: string
           quantity?: number
+          recovery_action?: string | null
+          recovery_notes?: string | null
+          recovery_reason?: string | null
+          refund_amount?: number | null
           scheduled_date?: string
           scheduled_time_slot?: string
           status?: string

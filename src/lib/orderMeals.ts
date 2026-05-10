@@ -2,7 +2,17 @@ export type NormalizedOrderMealStatus =
   | "scheduled"
   | "delivered"
   | "cancelled"
-  | "modified";
+  | "modified"
+  | "missed"
+  | "rescheduled"
+  | "refunded";
+
+export type NormalizedMealRecoveryAction =
+  | "none"
+  | "missed"
+  | "rescheduled"
+  | "cancelled"
+  | "refunded";
 
 export interface NormalizedOrderMeal {
   id: string;
@@ -18,6 +28,12 @@ export interface NormalizedOrderMeal {
   scheduled_time_slot: string;
   status: NormalizedOrderMealStatus;
   customer_note: string | null;
+  recovery_action: NormalizedMealRecoveryAction | null;
+  recovery_reason: string | null;
+  recovery_notes: string | null;
+  refund_amount: number | null;
+  original_scheduled_date: string | null;
+  original_scheduled_time_slot: string | null;
   metadata: Record<string, unknown>;
   created_at?: string | null;
   updated_at?: string | null;
@@ -59,7 +75,10 @@ const asStatus = (value: unknown): NormalizedOrderMealStatus => {
     value === "scheduled" ||
     value === "delivered" ||
     value === "cancelled" ||
-    value === "modified"
+    value === "modified" ||
+    value === "missed" ||
+    value === "rescheduled" ||
+    value === "refunded"
   ) {
     return value;
   }
@@ -69,6 +88,20 @@ const asStatus = (value: unknown): NormalizedOrderMealStatus => {
   }
 
   return "scheduled";
+};
+
+const asRecoveryAction = (value: unknown): NormalizedMealRecoveryAction | null => {
+  if (
+    value === "none" ||
+    value === "missed" ||
+    value === "rescheduled" ||
+    value === "cancelled" ||
+    value === "refunded"
+  ) {
+    return value;
+  }
+
+  return null;
 };
 
 const pickMealName = (item: Record<string, unknown>) => {
@@ -230,25 +263,41 @@ const pickTime = (item: Record<string, unknown>, fallback = "") => {
   );
 };
 
-export const normalizeOrderMealRow = (row: Record<string, unknown>): NormalizedOrderMeal => ({
-  id: asString(row.id),
-  order_id: asString(row.order_id),
-  meal_id: pickMealId(row),
-  meal_name: pickMealName(row),
-  meal_category: pickMealCategory(row),
-  meal_type: pickMealType(row),
-  dietary_tags: asArray(row.dietary_tags).filter((tag): tag is string => typeof tag === "string"),
-  quantity: asNumber(row.quantity, 1),
-  unit_price: asNumber(row.unit_price, 0),
-  scheduled_date: pickDate(row),
-  scheduled_time_slot: pickTime(row),
-  status: asStatus(row.status),
-  customer_note: cleanNoteText(row.customer_note) || cleanNoteText(row.note),
-  metadata: row.metadata && typeof row.metadata === "object" ? (row.metadata as Record<string, unknown>) : {},
-  created_at: typeof row.created_at === "string" ? row.created_at : null,
-  updated_at: typeof row.updated_at === "string" ? row.updated_at : null,
-  source: "order_meals",
-});
+export const normalizeOrderMealRow = (row: Record<string, unknown>): NormalizedOrderMeal => {
+  const metadata = row.metadata && typeof row.metadata === "object" ? (row.metadata as Record<string, unknown>) : {};
+
+  return {
+    id: asString(row.id),
+    order_id: asString(row.order_id),
+    meal_id: pickMealId(row),
+    meal_name: pickMealName(row),
+    meal_category: pickMealCategory(row),
+    meal_type: pickMealType(row),
+    dietary_tags: asArray(row.dietary_tags).filter((tag): tag is string => typeof tag === "string"),
+    quantity: asNumber(row.quantity, 1),
+    unit_price: asNumber(row.unit_price, 0),
+    scheduled_date: pickDate(row),
+    scheduled_time_slot: pickTime(row),
+    status: asStatus(row.status),
+    customer_note: cleanNoteText(row.customer_note) || cleanNoteText(row.note),
+    metadata,
+    recovery_action: asRecoveryAction(row.recovery_action ?? metadata.recovery_action),
+    recovery_reason: cleanNoteText(row.recovery_reason) || cleanNoteText(metadata.recovery_reason),
+    recovery_notes: cleanNoteText(row.recovery_notes) || cleanNoteText(metadata.recovery_notes),
+    refund_amount:
+      typeof row.refund_amount === "number" && !Number.isNaN(row.refund_amount)
+        ? row.refund_amount
+        : typeof metadata.refund_amount === "number" && !Number.isNaN(metadata.refund_amount)
+          ? metadata.refund_amount
+          : null,
+    original_scheduled_date: asString(row.original_scheduled_date || metadata.original_scheduled_date) || null,
+    original_scheduled_time_slot:
+      asString(row.original_scheduled_time_slot || metadata.original_scheduled_time_slot) || null,
+    created_at: typeof row.created_at === "string" ? row.created_at : null,
+    updated_at: typeof row.updated_at === "string" ? row.updated_at : null,
+    source: "order_meals",
+  };
+};
 
 export const parseLegacyMealSnapshot = (
   orderId: string,
@@ -284,6 +333,15 @@ export const parseLegacyMealSnapshot = (
         cleanNoteText(record.customer_note) ||
         cleanNoteText(record.special_instructions) ||
         cleanNoteText(record.note),
+      recovery_action: asRecoveryAction(record.recovery_action),
+      recovery_reason: cleanNoteText(record.recovery_reason),
+      recovery_notes: cleanNoteText(record.recovery_notes),
+      refund_amount:
+        typeof record.refund_amount === "number" && !Number.isNaN(record.refund_amount)
+          ? record.refund_amount
+          : null,
+      original_scheduled_date: asString(record.original_scheduled_date) || null,
+      original_scheduled_time_slot: asString(record.original_scheduled_time_slot) || null,
       metadata: {
         ...record,
         payment_record_id: paymentRecordId,
