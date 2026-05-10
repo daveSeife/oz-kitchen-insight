@@ -103,21 +103,23 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
     order.profiles?.phone_number || "",
   );
   const mealTotals = meals.reduce(
-    (summary: { total: number; remaining: number; delivered: number; cancelled: number }, meal) => {
+    (summary: { total: number; remaining: number; delivered: number; recovery: number; cancelled: number }, meal) => {
       const quantity = Number(meal.quantity || 0);
       summary.total += quantity;
 
       if (meal.status === "delivered") {
         summary.delivered += quantity;
-      } else if (meal.status === "cancelled") {
+      } else if (meal.status === "cancelled" || meal.status === "refunded") {
         summary.cancelled += quantity;
+      } else if (meal.status === "missed" || meal.status === "rescheduled" || meal.status === "modified") {
+        summary.recovery += quantity;
       } else {
         summary.remaining += quantity;
       }
 
       return summary;
     },
-    { total: 0, remaining: 0, delivered: 0, cancelled: 0 },
+    { total: 0, remaining: 0, delivered: 0, recovery: 0, cancelled: 0 },
   );
 
   const getStatusColor = (status: string) => {
@@ -127,6 +129,9 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
       preparing: "bg-purple-100 text-purple-800",
       delivered: "bg-green-100 text-green-800",
       cancelled: "bg-red-100 text-red-800",
+      missed: "bg-orange-100 text-orange-800",
+      rescheduled: "bg-cyan-100 text-cyan-800",
+      refunded: "bg-slate-100 text-slate-800",
     };
     return colors[status] || "bg-gray-100 text-gray-800";
   };
@@ -354,7 +359,7 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
                     {mealTotals.total} total meals
                   </Badge>
                 </div>
-                <div className="grid grid-cols-3 gap-3 mb-4">
+                <div className="grid grid-cols-2 gap-3 mb-4 sm:grid-cols-4">
                   <div className="rounded-lg border p-3">
                     <p className="text-xs text-muted-foreground">Remaining</p>
                     <p className="text-lg font-semibold">{mealTotals.remaining}</p>
@@ -364,7 +369,11 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
                     <p className="text-lg font-semibold">{mealTotals.delivered}</p>
                   </div>
                   <div className="rounded-lg border p-3">
-                    <p className="text-xs text-muted-foreground">Cancelled</p>
+                    <p className="text-xs text-muted-foreground">Recovery</p>
+                    <p className="text-lg font-semibold">{mealTotals.recovery}</p>
+                  </div>
+                  <div className="rounded-lg border p-3">
+                    <p className="text-xs text-muted-foreground">Cancelled / Refunded</p>
                     <p className="text-lg font-semibold">{mealTotals.cancelled}</p>
                   </div>
                 </div>
