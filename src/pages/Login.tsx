@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,27 @@ import { ChefHat, ArrowLeft, Mail, Lock } from "lucide-react";
 import { getAdminAccess } from "@/lib/adminAuth";
 import { motion } from "framer-motion";
 
+const AuthWrapper = ({ children }: { children: ReactNode }) => (
+  <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden bg-gradient-to-br from-primary/5 via-background to-secondary/5">
+    {/* Decorative blobs */}
+    <div className="absolute -top-32 -left-32 w-96 h-96 bg-primary/8 rounded-full blur-3xl" />
+    <div className="absolute -bottom-32 -right-32 w-96 h-96 bg-secondary/8 rounded-full blur-3xl" />
+    <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-primary/3 rounded-full blur-3xl" />
+    <motion.div
+      initial={{ opacity: 0, y: 20, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ duration: 0.5, ease: [0.33, 1, 0.68, 1] }}
+      className="relative z-10 w-full max-w-md"
+    >
+      {children}
+    </motion.div>
+  </div>
+);
+
+const getErrorMessage = (error: unknown, fallback: string) => {
+  return error instanceof Error ? error.message : fallback;
+};
+
 const Login = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -19,7 +40,7 @@ const Login = () => {
   const [resetLoading, setResetLoading] = useState(false);
   const navigate = useNavigate();
 
-  const handleLogin = async (e: React.FormEvent) => {
+  const handleLogin = async (e: FormEvent) => {
     e.preventDefault();
     setLoading(true);
     try {
@@ -34,8 +55,8 @@ const Login = () => {
       }
       toast.success("Welcome back!");
       navigate("/dashboard");
-    } catch (error: any) {
-      const message = error?.message || "Failed to login";
+    } catch (error: unknown) {
+      const message = getErrorMessage(error, "Failed to login");
       if (message.toLowerCase().includes("invalid login credentials")) {
         toast.error("Invalid email or password. If you just signed up, verify your email first.");
         return;
@@ -46,7 +67,7 @@ const Login = () => {
     }
   };
 
-  const handleForgotPassword = async (e: React.FormEvent) => {
+  const handleForgotPassword = async (e: FormEvent) => {
     e.preventDefault();
     if (!resetEmail) { toast.error("Please enter your email address"); return; }
     const normalizedResetEmail = resetEmail.trim().toLowerCase();
@@ -59,29 +80,12 @@ const Login = () => {
       toast.success("Password reset email sent! Check your inbox.");
       setShowForgotPassword(false);
       setResetEmail("");
-    } catch (error: any) {
-      toast.error(error.message || "Failed to send reset email");
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, "Failed to send reset email"));
     } finally {
       setResetLoading(false);
     }
   };
-
-  const AuthWrapper = ({ children }: { children: React.ReactNode }) => (
-    <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden bg-gradient-to-br from-primary/5 via-background to-secondary/5">
-      {/* Decorative blobs */}
-      <div className="absolute -top-32 -left-32 w-96 h-96 bg-primary/8 rounded-full blur-3xl" />
-      <div className="absolute -bottom-32 -right-32 w-96 h-96 bg-secondary/8 rounded-full blur-3xl" />
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-primary/3 rounded-full blur-3xl" />
-      <motion.div
-        initial={{ opacity: 0, y: 20, scale: 0.98 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        transition={{ duration: 0.5, ease: [0.33, 1, 0.68, 1] }}
-        className="relative z-10 w-full max-w-md"
-      >
-        {children}
-      </motion.div>
-    </div>
-  );
 
   if (showForgotPassword) {
     return (
@@ -148,7 +152,7 @@ const Login = () => {
               </div>
               <div className="relative">
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                <Input id="password" type="password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} required disabled={loading} className="pl-10 h-11 rounded-xl" />
+                <Input id="password" type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} required disabled={loading} className="pl-10 h-11 rounded-xl" />
               </div>
             </div>
             <Button type="submit" className="w-full h-11 rounded-xl font-semibold bg-gradient-to-r from-primary to-teal-700 hover:from-primary/90 hover:to-teal-700/90 shadow-lg shadow-primary/20" disabled={loading}>
