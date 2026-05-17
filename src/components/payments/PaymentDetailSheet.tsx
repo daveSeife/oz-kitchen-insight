@@ -7,11 +7,37 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { AlertCircle, CheckCircle } from "lucide-react";
+import { formatAddressText, normalizeDeliveryAddress } from "@/lib/orderMeals";
+
+export interface PaymentDetailPayment {
+  id: string;
+  record_id?: string;
+  order_id: string;
+  amount: number;
+  status: string;
+  payment_method: string;
+  created_at: string;
+  processed_at: string | null;
+  currency: string;
+  external_transaction_id?: string | null;
+  referral_id?: string | null;
+  commission_eligible?: boolean | null;
+  commission_calculated?: boolean | null;
+  payment_gateway_response?: unknown;
+  orders?: {
+    order_number?: string | null;
+    delivery_address?: unknown;
+  };
+  profiles?: {
+    first_name?: string | null;
+    last_name?: string | null;
+  };
+}
 
 interface PaymentDetailSheetProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  payment: any;
+  payment: PaymentDetailPayment | null;
   onUpdate?: () => void;
 }
 
@@ -35,6 +61,13 @@ export const PaymentDetailSheet = ({ open, onOpenChange, payment, onUpdate }: Pa
   }, [payment?.id, payment?.status]);
 
   if (!payment) return null;
+
+  const deliveryAddress = payment.orders?.delivery_address
+    ? normalizeDeliveryAddress(payment.orders.delivery_address)
+    : null;
+  const deliveryLocation = payment.orders?.delivery_address
+    ? formatAddressText(payment.orders.delivery_address)
+    : "";
 
   const getStatusBadge = (status: string) => {
     const variants: Record<string, "default" | "secondary" | "destructive"> = {
@@ -77,8 +110,8 @@ export const PaymentDetailSheet = ({ open, onOpenChange, payment, onUpdate }: Pa
       setStatus(newStatus);
       toast.success(`Payment status updated to ${newStatus}`);
       onUpdate?.();
-    } catch (error: any) {
-      toast.error(error?.message || "Failed to update payment status");
+    } catch (error: unknown) {
+      toast.error(error instanceof Error ? error.message : "Failed to update payment status");
       console.error(error);
     } finally {
       setUpdating(false);
@@ -118,6 +151,28 @@ export const PaymentDetailSheet = ({ open, onOpenChange, payment, onUpdate }: Pa
           </div>
 
           <Separator />
+
+          {/* Delivery Location */}
+          {payment.orders?.delivery_address && (
+            <>
+              <div>
+                <h4 className="font-medium mb-2">Delivery Location</h4>
+                <div className="text-sm space-y-1">
+                  {deliveryLocation && <p>{deliveryLocation}</p>}
+                  {deliveryAddress?.contactPhone && (
+                    <p className="text-muted-foreground">Phone: {deliveryAddress.contactPhone}</p>
+                  )}
+                  {deliveryAddress?.specialInstructions && (
+                    <p className="text-muted-foreground italic">
+                      {deliveryAddress.specialInstructions}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <Separator />
+            </>
+          )}
 
           {/* Payment Amount */}
           <div>

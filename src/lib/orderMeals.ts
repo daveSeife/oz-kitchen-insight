@@ -50,6 +50,7 @@ export interface NormalizedDeliveryAddress {
   contactPhone: string;
   contactEmail: string;
   street: string;
+  area: string;
   city: string;
   zone: string;
   buildingNumber: string;
@@ -371,6 +372,7 @@ export const normalizeDeliveryAddress = (deliveryAddress: unknown): NormalizedDe
     contactPhone: mergeFirstString(root.contact_phone, root.contactPhone, root.phone),
     contactEmail: mergeFirstString(root.contact_email, root.contactEmail, root.email),
     street: mergeFirstString(root.address_line_1, root.street, nestedStreet.street),
+    area: mergeFirstString(root.area, nestedStreet.area, root.city, nestedStreet.city, root.zone, nestedStreet.zone),
     city: mergeFirstString(root.city, nestedStreet.city),
     zone: mergeFirstString(root.zone, nestedStreet.zone),
     buildingNumber: mergeFirstString(root.building_number, root.buildingNumber, nestedStreet.building_number),
@@ -425,8 +427,14 @@ export const formatAddressText = (deliveryAddress: unknown) => {
   }
 
   const normalized = normalizeDeliveryAddress(deliveryAddress);
+  const standaloneArea =
+    normalized.area && normalized.area !== normalized.city && normalized.area !== normalized.zone
+      ? normalized.area
+      : "";
+
   return [
     normalized.street,
+    standaloneArea,
     normalized.city,
     normalized.zone ? `Zone ${normalized.zone}` : "",
     normalized.buildingNumber ? `Bldg ${normalized.buildingNumber}` : "",
