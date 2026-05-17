@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
 import { Input } from "@/components/ui/input";
@@ -6,15 +6,15 @@ import { Button } from "@/components/ui/button";
 import { Search, Download, CreditCard } from "lucide-react";
 import { toast } from "sonner";
 import { exportToCSV } from "@/lib/csvExport";
-import { PaymentDetailSheet } from "@/components/payments/PaymentDetailSheet";
+import { PaymentDetailSheet, type PaymentDetailPayment } from "@/components/payments/PaymentDetailSheet";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { motion } from "framer-motion";
 
-interface Payment {
+interface Payment extends PaymentDetailPayment {
   id: string; record_id?: string; order_id: string; amount: number;
   status: string; payment_method: string; created_at: string;
   processed_at: string | null; currency: string;
-  orders: { order_number: string; user_id: string; };
+  orders: { order_number: string; user_id: string; delivery_address?: unknown; };
   profiles?: { first_name: string; last_name: string; };
 }
 
@@ -24,6 +24,11 @@ const statusStyles: Record<string, string> = {
   failed: "status-failed", refunded: "status-preparing",
 };
 
+const toUiPaymentStatus = (value?: string | null) => {
+  if (value === "paid") return "completed";
+  return value || "pending";
+};
+
 const Payments = () => {
   const [payments, setPayments] = useState<Payment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -31,26 +36,12 @@ const Payments = () => {
   const [selectedPayment, setSelectedPayment] = useState<Payment | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
 
-  const toUiPaymentStatus = (value?: string | null) => {
-    if (value === "paid") return "completed";
-    return value || "pending";
-  };
-
-  useEffect(() => {
-    fetchPayments();
-    const channel = supabase
-      .channel('payments-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'payments' }, () => { fetchPayments(); })
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, []);
-
-  const fetchPayments = async () => {
+  const fetchPayments = useCallback(async () => {
     try {
       const [{ data: paymentRows, error: paymentsError }, { data: orderRows, error: ordersError }] =
         await Promise.all([
           supabase.from("payments").select("*").order("created_at", { ascending: false }),
-          supabase.from("orders").select(`id, order_number, user_id, total_amount, payment_status, payment_method, created_at`).order("created_at", { ascending: false }),
+          supabase.from("orders").select(`id, order_number, user_id, total_amount, payment_status, payment_method, delivery_address, created_at`).order("created_at", { ascending: false }),
         ]);
       if (paymentsError) throw paymentsError;
       if (ordersError) throw ordersError;
@@ -65,20 +56,29 @@ const Payments = () => {
       const paymentsWithProfiles = (paymentRows || []).map((payment) => {
         const order = orderMap[payment.order_id];
         if (!order) return null;
-        return { ...payment, record_id: payment.id, status: toUiPaymentStatus(payment.status), payment_method: payment.payment_method || order.payment_method || "unknown", currency: payment.currency || "ETB", orders: { order_number: order.order_number, user_id: order.user_id }, profiles: profileMap[order.user_id] || { first_name: "", last_name: "" } };
+        return { ...payment, record_id: payment.id, status: toUiPaymentStatus(payment.status), payment_method: payment.payment_method || order.payment_method || "unknown", currency: payment.currency || "ETB", orders: { order_number: order.order_number, user_id: order.user_id, delivery_address: order.delivery_address }, profiles: profileMap[order.user_id] || { first_name: "", last_name: "" } };
       }).filter(Boolean);
       const ordersMissingPayments = (orderRows || []).filter((order) => !paymentsWithProfiles.some((payment) => payment.order_id === order.id)).map((order) => ({
-        id: `order-${order.id}`, record_id: undefined, order_id: order.id, amount: order.total_amount, status: toUiPaymentStatus(order.payment_status), payment_method: order.payment_method || "unknown", created_at: order.created_at, processed_at: null, currency: "ETB", orders: { order_number: order.order_number, user_id: order.user_id }, profiles: profileMap[order.user_id] || { first_name: "", last_name: "" },
+        id: `order-${order.id}`, record_id: undefined, order_id: order.id, amount: order.total_amount, status: toUiPaymentStatus(order.payment_status), payment_method: order.payment_method || "unknown", created_at: order.created_at, processed_at: null, currency: "ETB", orders: { order_number: order.order_number, user_id: order.user_id, delivery_address: order.delivery_address }, profiles: profileMap[order.user_id] || { first_name: "", last_name: "" },
       }));
       const combinedPayments = [...paymentsWithProfiles, ...ordersMissingPayments].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
       setPayments(combinedPayments as Payment[]);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("[Payments] fetchPayments error", error);
       toast.error("Failed to fetch payments");
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchPayments();
+    const channel = supabase
+      .channel('payments-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'payments' }, () => { fetchPayments(); })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [fetchPayments]);
 
   const filteredPayments = payments.filter((payment) =>
     payment.orders?.order_number.toLowerCase().includes(search.toLowerCase()) ||

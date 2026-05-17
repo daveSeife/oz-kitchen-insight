@@ -71,6 +71,7 @@ import {
   getDeliveryContactName,
   getDeliveryContactPhone,
   getMealDayName,
+  normalizeDeliveryAddress,
   type NormalizedMealRecoveryAction,
   normalizeMealType,
   normalizeOrderMealRow,
@@ -322,6 +323,19 @@ const getMealQuantityTotal = (rows: OrderedMealRow[]) =>
 
 const isPaymentConfirmed = (paymentStatus?: string | null) =>
   paymentStatus === "paid" || paymentStatus === "partial" || paymentStatus === "completed";
+
+const getExportAddressParts = (deliveryAddress: unknown) => {
+  const address = normalizeDeliveryAddress(deliveryAddress);
+  const buildingDetails = [address.buildingNumber, address.specialInstructions]
+    .filter(Boolean)
+    .join(", ");
+
+  return {
+    zone: address.zone,
+    street: address.street,
+    building_details: buildingDetails,
+  };
+};
 
 const isInactiveMealStatus = (status: NormalizedOrderMealStatus) =>
   status === "cancelled" || status === "refunded";
@@ -1170,24 +1184,48 @@ const Orders = () => {
   };
 
   const handleExportOrderedMeals = () => {
-    const exportData = filteredOrderedMeals.map((row) => ({
-      order_number: row.order.order_number,
-      full_name: row.fullName,
-      phone: row.phone,
-      location: row.location,
-      meal: row.meal.meal_name,
-      quantity: row.meal.quantity,
-      delivery_guy: "",
-      notes: getMealNoteText(row.meal),
-    }));
+    const confirmedMealRows = filteredOrderedMeals.filter((row) =>
+      isPaymentConfirmed(row.order.payment_status),
+    );
+    const excludedCount = filteredOrderedMeals.length - confirmedMealRows.length;
+
+    if (confirmedMealRows.length === 0) {
+      toast.error(
+        filteredOrderedMeals.length > 0
+          ? "No confirmed or paid meal rows to export. Unpaid orders were excluded."
+          : "No ordered meals to export.",
+      );
+      return;
+    }
+
+    const exportData = confirmedMealRows.map((row) => {
+      const addressParts = getExportAddressParts(row.order.delivery_address);
+
+      return {
+        order_number: row.order.order_number,
+        full_name: row.fullName,
+        phone: row.phone,
+        zone: addressParts.zone,
+        street: addressParts.street,
+        building_details: addressParts.building_details,
+        meal: row.meal.meal_name,
+        quantity: row.meal.quantity,
+        delivery_guy: "",
+        notes: getMealNoteText(row.meal),
+      };
+    });
 
     exportToExcel(
       exportData,
       "ordered_meals",
-      ["order_number", "full_name", "phone", "location", "meal", "quantity", "delivery_guy", "notes"],
-      ["Order #", "Full Name", "Phone", "Location", "Meal", "Quantity", "Delivery Guy", "Notes"],
+      ["order_number", "full_name", "phone", "zone", "street", "building_details", "meal", "quantity", "delivery_guy", "notes"],
+      ["Order #", "Full Name", "Phone", "Zone", "Street", "Building / Instructions", "Meal", "Quantity", "Delivery Guy", "Notes"],
     );
-    toast.success("Ordered meals exported successfully");
+    toast.success(
+      excludedCount > 0
+        ? `Ordered meals exported successfully. ${excludedCount} unpaid meal row${excludedCount === 1 ? "" : "s"} excluded.`
+        : "Ordered meals exported successfully",
+    );
   };
 
   return (
