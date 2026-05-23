@@ -324,6 +324,9 @@ const getMealQuantityTotal = (rows: OrderedMealRow[]) =>
 const isPaymentConfirmed = (paymentStatus?: string | null) =>
   paymentStatus === "paid" || paymentStatus === "partial" || paymentStatus === "completed";
 
+const isExcludedPaymentStatus = (paymentStatus?: string | null) =>
+  paymentStatus === "failed" || paymentStatus === "refunded";
+
 const getExportAddressParts = (deliveryAddress: unknown) => {
   const address = normalizeDeliveryAddress(deliveryAddress);
   const buildingDetails = [address.buildingNumber, address.specialInstructions]
@@ -839,6 +842,10 @@ const Orders = () => {
 
   const filteredOrders = useMemo(() => {
     return orders.filter((order) => {
+      if (isExcludedPaymentStatus(order.payment_status)) {
+        return false;
+      }
+
       const customerName = getDeliveryContactName(
         order.delivery_address,
         `${order.profiles.first_name} ${order.profiles.last_name}`.trim(),
@@ -875,6 +882,10 @@ const Orders = () => {
 
   const orderedMealRows = useMemo<OrderedMealRow[]>(() => {
     const rows = orders.flatMap((order) => {
+      if (isExcludedPaymentStatus(order.payment_status)) {
+        return [];
+      }
+
       const fullName = getDeliveryContactName(
         order.delivery_address,
         `${order.profiles.first_name || ""} ${order.profiles.last_name || ""}`.trim(),
