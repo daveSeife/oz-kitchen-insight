@@ -125,6 +125,31 @@ interface LatestPaymentRecord {
 
 type MealAdminAction = "missed" | "rescheduled" | "cancelled" | "refunded";
 
+const WEEKDAY_COLUMNS = [
+  { label: "Monday", shortLabel: "Mon", dayOffset: 0 },
+  { label: "Tuesday", shortLabel: "Tue", dayOffset: 1 },
+  { label: "Wednesday", shortLabel: "Wed", dayOffset: 2 },
+  { label: "Thursday", shortLabel: "Thu", dayOffset: 3 },
+  { label: "Friday", shortLabel: "Fri", dayOffset: 4 },
+] as const;
+
+const toDateKey = (date: Date) => format(date, "yyyy-MM-dd");
+
+const getMondayForWeek = (date: Date) => {
+  const weekStart = new Date(date);
+  const day = weekStart.getDay();
+  const distanceFromMonday = day === 0 ? 6 : day - 1;
+  weekStart.setHours(0, 0, 0, 0);
+  weekStart.setDate(weekStart.getDate() - distanceFromMonday);
+  return weekStart;
+};
+
+const addDays = (date: Date, amount: number) => {
+  const nextDate = new Date(date);
+  nextDate.setDate(nextDate.getDate() + amount);
+  return nextDate;
+};
+
 const isMissingOrderMealsTableError = (error: { code?: string; message?: string; hint?: string } | null | undefined) => {
   if (!error) return false;
 
@@ -385,6 +410,7 @@ const Orders = () => {
   const [endDate, setEndDate] = useState<Date | undefined>(undefined);
   const [deliveryDateFilter, setDeliveryDateFilter] = useState<Date | undefined>(undefined);
   const [selectedMealDate, setSelectedMealDate] = useState<Date | undefined>(undefined);
+  const [selectedWeekDate, setSelectedWeekDate] = useState<Date>(new Date());
   const [selectedTimeSlot, setSelectedTimeSlot] = useState("all");
   const [selectedMealType, setSelectedMealType] = useState("all");
   const [updatingMealId, setUpdatingMealId] = useState<string | null>(null);
@@ -994,6 +1020,84 @@ const Orders = () => {
     };
   }, [filteredOrderedMealKeys, selectedMealRowKeys]);
 
+  const weeklyMealSchedule = useMemo(() => {
+    const weekStart = getMondayForWeek(selectedWeekDate);
+    const weekDates = WEEKDAY_COLUMNS.map((day) => {
+      const date = addDays(weekStart, day.dayOffset);
+      return {
+        ...day,
+        date,
+        dateKey: toDateKey(date),
+      };
+    });
+    const weekdayDateKeys = new Set(weekDates.map((day) => day.dateKey));
+    const scheduleGroups = new Map<
+      string,
+      {
+        key: string;
+        fullName: string;
+        phone: string;
+        location: string;
+        orderNumbers: Set<string>;
+        mealsByDate: Record<string, OrderedMealRow[]>;
+      }
+    >();
+
+    for (const row of orderedMealRows) {
+      if (!row.meal.scheduled_date || !weekdayDateKeys.has(row.meal.scheduled_date)) {
+        continue;
+      }
+
+      const haystack = [
+        row.fullName,
+        row.phone,
+        row.location,
+        row.meal.meal_name,
+        row.order.order_number,
+        row.meal.customer_note || "",
+      ]
+        .join(" ")
+        .toLowerCase();
+
+      if (search && !haystack.includes(search.toLowerCase())) {
+        continue;
+      }
+
+      const customerKey = [row.order.user_id, row.fullName, row.phone, row.location].join("::");
+      const existingGroup =
+        scheduleGroups.get(customerKey) ||
+        {
+          key: customerKey,
+          fullName: row.fullName,
+          phone: row.phone,
+          location: row.location,
+          orderNumbers: new Set<string>(),
+          mealsByDate: Object.fromEntries(weekDates.map((day) => [day.dateKey, []])) as Record<
+            string,
+            OrderedMealRow[]
+          >,
+        };
+
+      existingGroup.orderNumbers.add(row.order.order_number);
+      existingGroup.mealsByDate[row.meal.scheduled_date].push(row);
+      scheduleGroups.set(customerKey, existingGroup);
+    }
+
+    const customers = Array.from(scheduleGroups.values())
+      .map((group) => ({
+        ...group,
+        orderNumbers: Array.from(group.orderNumbers).sort(),
+      }))
+      .sort((left, right) => left.fullName.localeCompare(right.fullName));
+
+    return {
+      weekStart,
+      weekEnd: addDays(weekStart, 4),
+      weekDates,
+      customers,
+    };
+  }, [orderedMealRows, search, selectedWeekDate]);
+
   const toggleMealRowSelection = (row: OrderedMealRow, checked: boolean) => {
     const rowKey = getOrderedMealRowKey(row);
 
@@ -1015,14 +1119,23 @@ const Orders = () => {
   const handleMarkSelectedDelivered = async () => {
     if (selectedOrderedMealRows.length === 0) return;
 
-    const blockedMeals = selectedOrderedMealRows.filter((row) => !isPaymentConfirmed(row.order.payment_status));
+    const deliverableRows = selectedOrderedMealRows.filter((row) => row.meal.status !== "delivered");
+    if (deliverableRows.length === 0) {
+      toast.info("Selected meals are already delivered.");
+      setSelectedMealRowKeys((current) =>
+        current.filter((value) => !selectedOrderedMealRows.some((row) => getOrderedMealRowKey(row) === value)),
+      );
+      return;
+    }
+
+    const blockedMeals = deliverableRows.filter((row) => !isPaymentConfirmed(row.order.payment_status));
     if (blockedMeals.length > 0) {
       toast.error("Some selected meals cannot be delivered until payment is confirmed.");
       return;
     }
 
     try {
-      for (const row of selectedOrderedMealRows) {
+      for (const row of deliverableRows) {
         await updateMealStatus(row.meal, row.order, "delivered", {
           silent: true,
           refetch: false,
@@ -1167,6 +1280,7 @@ const Orders = () => {
         `${order.profiles.first_name || ""} ${order.profiles.last_name || ""}`.trim(),
       ),
       phone: getDeliveryContactPhone(order.delivery_address, order.profiles.phone_number || ""),
+      delivery_date: order.delivery_date || order.meals.find((meal) => meal.scheduled_date)?.scheduled_date || "",
       total_meals: order.meals.reduce((sum, meal) => sum + meal.quantity, 0),
       payment_status: formatPaymentStatus(order.payment_status),
       meal_breakdown: order.meals
@@ -1184,6 +1298,7 @@ const Orders = () => {
       "order_number",
       "customer_name",
       "phone",
+      "delivery_date",
       "total_meals",
       "payment_status",
       "meal_breakdown",
@@ -1219,6 +1334,7 @@ const Orders = () => {
         zone: addressParts.zone,
         street: addressParts.street,
         building_details: addressParts.building_details,
+        delivery_date: row.meal.scheduled_date || row.order.delivery_date || "",
         meal: row.meal.meal_name,
         quantity: row.meal.quantity,
         delivery_guy: "",
@@ -1229,14 +1345,66 @@ const Orders = () => {
     exportToExcel(
       exportData,
       "ordered_meals",
-      ["order_number", "full_name", "phone", "zone", "street", "building_details", "meal", "quantity", "delivery_guy", "notes"],
-      ["Order #", "Full Name", "Phone", "Zone", "Street", "Building / Instructions", "Meal", "Quantity", "Delivery Guy", "Notes"],
+      ["order_number", "full_name", "phone", "zone", "street", "building_details", "delivery_date", "meal", "quantity", "delivery_guy", "notes"],
+      ["Order #", "Full Name", "Phone", "Zone", "Street", "Building / Instructions", "Delivery Date", "Meal", "Quantity", "Delivery Guy", "Notes"],
     );
     toast.success(
       excludedCount > 0
         ? `Ordered meals exported successfully. ${excludedCount} unpaid meal row${excludedCount === 1 ? "" : "s"} excluded.`
         : "Ordered meals exported successfully",
     );
+  };
+
+  const handleExportWeeklyMeals = () => {
+    if (weeklyMealSchedule.customers.length === 0) {
+      toast.error("No weekly meals to export.");
+      return;
+    }
+
+    const exportData = weeklyMealSchedule.customers.map((customer) => {
+      const row: Record<string, string> = {
+        full_name: customer.fullName,
+        phone: customer.phone,
+        location: customer.location,
+        order_numbers: customer.orderNumbers.join(", "),
+        week: `${toDateKey(weeklyMealSchedule.weekStart)} to ${toDateKey(weeklyMealSchedule.weekEnd)}`,
+      };
+
+      for (const day of weeklyMealSchedule.weekDates) {
+        const meals = customer.mealsByDate[day.dateKey] || [];
+        const dayKey = day.label.toLowerCase();
+
+        row[`${dayKey}_date`] = day.dateKey;
+        row[`${dayKey}_has_meal`] = meals.length > 0 ? "Yes" : "No";
+        row[`${dayKey}_meals`] = meals
+          .map((mealRow) => {
+            const quantityText = mealRow.meal.quantity > 1 ? ` x${mealRow.meal.quantity}` : "";
+            const timeText = mealRow.meal.scheduled_time_slot ? ` (${mealRow.meal.scheduled_time_slot})` : "";
+            return `${mealRow.meal.meal_name}${quantityText}${timeText}`;
+          })
+          .join(" | ");
+      }
+
+      return row;
+    });
+
+    const weekdayHeaders = weeklyMealSchedule.weekDates.flatMap((day) => {
+      const dayKey = day.label.toLowerCase();
+      return [`${dayKey}_date`, `${dayKey}_has_meal`, `${dayKey}_meals`];
+    });
+    const weekdayLabels = weeklyMealSchedule.weekDates.flatMap((day) => [
+      `${day.label} Date`,
+      day.label,
+      `${day.label} Meals`,
+    ]);
+
+    exportToExcel(
+      exportData,
+      "weekly_meals",
+      ["full_name", "phone", "location", "order_numbers", "week", ...weekdayHeaders],
+      ["Full Name", "Phone", "Location", "Order #", "Week", ...weekdayLabels],
+    );
+    toast.success("Weekly meals exported successfully");
   };
 
   return (
@@ -1258,6 +1426,9 @@ const Orders = () => {
               <TabsTrigger value="delivery-log" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm">
                 Delivery Log
               </TabsTrigger>
+              <TabsTrigger value="weekly-meals" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm">
+                Weekly Meals
+              </TabsTrigger>
               <TabsTrigger value="orders" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm">
                 Orders View
               </TabsTrigger>
@@ -1270,6 +1441,8 @@ const Orders = () => {
                   placeholder={
                     activeTab === "ordered-meals"
                       ? "Search customer, phone, meal, location..."
+                      : activeTab === "weekly-meals"
+                        ? "Search weekly meals..."
                       : "Search order number, customer, phone..."
                   }
                   value={search}
@@ -1282,6 +1455,11 @@ const Orders = () => {
                 <Button onClick={handleExportOrderedMeals} variant="outline" className="rounded-xl h-10">
                   <Download className="w-4 h-4 mr-2" />
                   Export Excel
+                </Button>
+              ) : activeTab === "weekly-meals" ? (
+                <Button onClick={handleExportWeeklyMeals} variant="outline" className="rounded-xl h-10">
+                  <Download className="w-4 h-4 mr-2" />
+                  Export Weekly Excel
                 </Button>
               ) : (
                 <Button onClick={handleExportOrders} variant="outline" className="rounded-xl h-10">
@@ -1478,16 +1656,29 @@ const Orders = () => {
                           </TableCell>
                           <TableCell>
                             <div className="space-y-2">
-                              <Button
-                                type="button"
-                                size="sm"
-                                className="w-full justify-center rounded-lg font-semibold bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white shadow-sm"
-                                disabled={updatingMealId === row.meal.id || !isPaymentConfirmed(row.order.payment_status)}
-                                onClick={() => void updateMealStatus(row.meal, row.order, "delivered")}
-                              >
-                                <CheckCircle2 className="w-4 h-4 mr-2" />
-                                Delivered
-                              </Button>
+                              {row.meal.status === "delivered" ? (
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="secondary"
+                                  className="w-full justify-center rounded-lg font-semibold text-emerald-700 bg-emerald-50"
+                                  disabled
+                                >
+                                  <CheckCircle2 className="w-4 h-4 mr-2" />
+                                  Delivered
+                                </Button>
+                              ) : (
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  className="w-full justify-center rounded-lg font-semibold bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white shadow-sm"
+                                  disabled={updatingMealId === row.meal.id || !isPaymentConfirmed(row.order.payment_status)}
+                                  onClick={() => void updateMealStatus(row.meal, row.order, "delivered")}
+                                >
+                                  <CheckCircle2 className="w-4 h-4 mr-2" />
+                                  Mark as Delivered
+                                </Button>
+                              )}
 
                               <DropdownMenu>
                                 <DropdownMenuTrigger asChild>
@@ -1557,6 +1748,133 @@ const Orders = () => {
                 </div>
               </motion.div>
             </div>
+          </TabsContent>
+
+          <TabsContent value="weekly-meals" className="space-y-6 mt-6">
+            <div className="flex items-center gap-3 flex-wrap">
+              <Button
+                variant="outline"
+                className="rounded-xl h-10 bg-card"
+                onClick={() => setSelectedWeekDate((current) => addDays(current, -7))}
+              >
+                Previous Week
+              </Button>
+
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" className="rounded-xl h-10 bg-card">
+                    <Calendar className="w-4 h-4 mr-2" />
+                    {format(weeklyMealSchedule.weekStart, "MMM dd")} - {format(weeklyMealSchedule.weekEnd, "MMM dd, yyyy")}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0 rounded-xl" align="start">
+                  <CalendarComponent
+                    mode="single"
+                    selected={selectedWeekDate}
+                    onSelect={(date) => date && setSelectedWeekDate(getMondayForWeek(date))}
+                    initialFocus
+                  />
+                </PopoverContent>
+              </Popover>
+
+              <Button
+                variant="outline"
+                className="rounded-xl h-10 bg-card"
+                onClick={() => setSelectedWeekDate((current) => addDays(current, 7))}
+              >
+                Next Week
+              </Button>
+
+              <Button variant="secondary" className="rounded-xl h-10" onClick={() => setSelectedWeekDate(new Date())}>
+                This Week
+              </Button>
+            </div>
+
+            <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="rounded-xl border border-border/50 bg-card shadow-card overflow-hidden">
+              <div className="border-b border-border/50 bg-muted/20 px-5 py-4">
+                <h3 className="font-heading font-bold text-lg">Weekly Customer Meal Plan</h3>
+                <p className="text-sm text-muted-foreground">
+                  Customer information with meals grouped from Monday to Friday.
+                </p>
+              </div>
+
+              <div className="overflow-x-auto">
+                <div className="min-w-[1180px]">
+                  <div className="grid grid-cols-[280px_repeat(5,minmax(170px,1fr))] border-b border-border/50 bg-muted/40">
+                    <div className="px-4 py-3 text-xs font-semibold uppercase text-muted-foreground">
+                      Customer
+                    </div>
+                    {weeklyMealSchedule.weekDates.map((day) => (
+                      <div key={day.dateKey} className="border-l border-border/50 px-4 py-3">
+                        <p className="text-xs font-semibold uppercase text-muted-foreground">{day.label}</p>
+                        <p className="text-sm font-semibold text-foreground">{format(day.date, "MMM dd")}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  {loading ? (
+                    <div className="flex flex-col items-center justify-center py-12 text-center">
+                      <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+                      <p className="text-sm text-muted-foreground mt-3">Loading weekly meals...</p>
+                    </div>
+                  ) : weeklyMealSchedule.customers.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-12 text-center">
+                      <Calendar className="w-10 h-10 text-muted-foreground/30" />
+                      <p className="text-sm text-muted-foreground mt-3">No meals scheduled for this week.</p>
+                    </div>
+                  ) : (
+                    weeklyMealSchedule.customers.map((customer) => (
+                      <div key={customer.key} className="grid grid-cols-[280px_repeat(5,minmax(170px,1fr))] border-b border-border/50 last:border-b-0">
+                        <div className="px-4 py-4">
+                          <p className="font-semibold text-foreground">{customer.fullName || "Unknown"}</p>
+                          <p className="text-xs text-muted-foreground tabular-nums">{customer.phone || "-"}</p>
+                          <p className="text-xs text-muted-foreground mt-1 line-clamp-2" title={customer.location || ""}>
+                            {customer.location || "-"}
+                          </p>
+                          <p className="text-[10px] text-muted-foreground mt-2 font-mono">
+                            {customer.orderNumbers.join(", ")}
+                          </p>
+                        </div>
+
+                        {weeklyMealSchedule.weekDates.map((day) => {
+                          const meals = customer.mealsByDate[day.dateKey] || [];
+
+                          return (
+                            <div key={`${customer.key}-${day.dateKey}`} className="border-l border-border/50 px-3 py-3">
+                              {meals.length === 0 ? (
+                                <span className="text-xs text-muted-foreground">-</span>
+                              ) : (
+                                <div className="space-y-2">
+                                  {meals.map((row) => (
+                                    <div key={getOrderedMealRowKey(row)} className="rounded-lg border border-border/50 bg-background p-2">
+                                      <div className="flex items-start justify-between gap-2">
+                                        <p className="text-sm font-semibold text-foreground leading-snug">{row.meal.meal_name}</p>
+                                        <span className="text-xs font-semibold tabular-nums">x{row.meal.quantity}</span>
+                                      </div>
+                                      {row.meal.scheduled_time_slot && (
+                                        <p className="text-[11px] text-muted-foreground mt-1">{row.meal.scheduled_time_slot}</p>
+                                      )}
+                                      <div className="flex gap-1.5 flex-wrap mt-2">
+                                        <Badge variant="outline" className={`text-[10px] border-0 ring-1 ring-inset ${getMealStatusColor(row.meal.status)}`}>
+                                          {row.meal.status}
+                                        </Badge>
+                                        <span className="inline-flex items-center rounded-md bg-muted/70 px-2 py-0.5 text-[10px] font-medium text-muted-foreground uppercase">
+                                          {row.meal.meal_type}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </motion.div>
           </TabsContent>
 
           <TabsContent value="delivery-log" className="space-y-6 mt-6">
