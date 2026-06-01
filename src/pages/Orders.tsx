@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { toast } from "sonner";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
 import { OrderCreateDialog } from "@/components/orders/OrderCreateDialog";
@@ -124,6 +125,9 @@ interface LatestPaymentRecord {
 }
 
 type MealAdminAction = "missed" | "rescheduled" | "cancelled" | "refunded";
+type OrdersQueryData = { orders: Order[]; isAdmin: boolean };
+
+export const ORDERS_QUERY_KEY = ["orders"] as const;
 
 const WEEKDAY_COLUMNS = [
   { label: "Monday", shortLabel: "Mon", dayOffset: 0 },
@@ -398,13 +402,11 @@ const deriveOrderStatusFromMeals = (meals: NormalizedOrderMeal[], currentStatus?
 };
 
 const Orders = () => {
-  const [orders, setOrders] = useState<Order[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
   const [activeTab, setActiveTab] = useState("ordered-meals");
   const [startDate, setStartDate] = useState<Date | undefined>(undefined);
   const [endDate, setEndDate] = useState<Date | undefined>(undefined);
@@ -475,37 +477,27 @@ const Orders = () => {
     return null;
   };
 
-  const checkAdminStatus = useCallback(async () => {
+  const invalidateOrders = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ORDERS_QUERY_KEY });
+  }, [queryClient]);
+
+  const fetchOrders = async () => {
     const {
       data: { user },
     } = await supabase.auth.getUser();
 
     if (!user) {
-      setIsAdmin(false);
-      return;
+      return { orders: [], isAdmin: false };
     }
 
     const adminAccess = await getAdminAccess(user.id);
-    setIsAdmin(adminAccess.hasAccess);
-  }, []);
+    const currentUserIsAdmin = adminAccess.hasAccess;
 
-  const fetchOrders = useCallback(async () => {
-    try {
-      setLoading(true);
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+    let ordersQuery = supabase.from("orders").select("*");
 
-      if (!user) {
-        setOrders([]);
-        return;
-      }
-
-      let ordersQuery = supabase.from("orders").select("*");
-
-      if (!isAdmin) {
-        ordersQuery = ordersQuery.eq("user_id", user.id);
-      }
+    if (!currentUserIsAdmin) {
+      ordersQuery = ordersQuery.eq("user_id", user.id);
+    }
 
       const { data: ordersData, error: ordersError } = await ordersQuery.order("created_at", {
         ascending: false,
@@ -632,39 +624,43 @@ const Orders = () => {
         };
       });
 
-      setOrders(normalizedOrders);
-    } catch (error: unknown) {
-      console.error("[Orders] fetchOrders error", error);
-      toast.error("Failed to fetch orders");
-    } finally {
-      setLoading(false);
+    return { orders: normalizedOrders, isAdmin: currentUserIsAdmin };
+  };
+
+  const {
+    data: ordersQueryData,
+    error: ordersError,
+    isLoading: loading,
+  } = useQuery({
+    queryKey: ORDERS_QUERY_KEY,
+    queryFn: fetchOrders,
+    staleTime: Infinity,
+    gcTime: 30 * 60 * 1000,
+    refetchOnMount: true,
+    refetchOnReconnect: false,
+    refetchOnWindowFocus: false,
+    retry: 1,
+  });
+
+  const orders = ordersQueryData?.orders || [];
+  const isAdmin = ordersQueryData?.isAdmin || false;
+  const selectedOrderId = selectedOrder?.id;
+
+  useEffect(() => {
+    if (!selectedOrderId) return;
+
+    const refreshedOrder = orders.find((order) => order.id === selectedOrderId) || null;
+    setSelectedOrder(refreshedOrder);
+    if (!refreshedOrder) {
+      setSheetOpen(false);
     }
-  }, [isAdmin]);
+  }, [orders, selectedOrderId]);
 
   useEffect(() => {
-    void checkAdminStatus();
-  }, [checkAdminStatus]);
-
-  useEffect(() => {
-    void fetchOrders();
-
-    const channel = supabase
-      .channel("admin-orders-view")
-      .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, () => {
-        void fetchOrders();
-      })
-      .on("postgres_changes", { event: "*", schema: "public", table: "payments" }, () => {
-        void fetchOrders();
-      })
-      .on("postgres_changes", { event: "*", schema: "public", table: "order_meals" }, () => {
-        void fetchOrders();
-      })
-      .subscribe();
-
-    return () => {
-      void supabase.removeChannel(channel);
-    };
-  }, [fetchOrders]);
+    if (!ordersError) return;
+    console.error("[Orders] fetchOrders error", ordersError);
+    toast.error("Failed to fetch orders");
+  }, [ordersError]);
 
   const updateOrderStatus = async (orderId: string, newStatus: string) => {
     try {
@@ -681,8 +677,20 @@ const Orders = () => {
       const { error } = await supabase.from("orders").update({ status: newStatus }).eq("id", orderId);
 
       if (error) throw error;
+      queryClient.setQueryData<OrdersQueryData>(ORDERS_QUERY_KEY, (current) =>
+        current
+          ? {
+              ...current,
+              orders: current.orders.map((order) =>
+                order.id === orderId ? { ...order, status: newStatus } : order,
+              ),
+            }
+          : current,
+      );
+      setSelectedOrder((current) =>
+        current?.id === orderId ? { ...current, status: newStatus } : current,
+      );
       toast.success("Order status updated");
-      void fetchOrders();
     } catch (error) {
       toast.error("Failed to update order status");
     }
@@ -825,7 +833,7 @@ const Orders = () => {
       }
 
       if (options?.refetch !== false) {
-        void fetchOrders();
+        invalidateOrders();
       }
 
       if (!options?.silent) {
@@ -1154,7 +1162,7 @@ const Orders = () => {
         current.filter((value) => !selectedOrderedMealRows.some((row) => getOrderedMealRowKey(row) === value)),
       );
       toast.success("Selected meals marked as delivered");
-      void fetchOrders();
+      invalidateOrders();
     } catch (error) {
       console.error("[Orders] handleMarkSelectedDelivered error", error);
       toast.error("Failed to mark selected meals as delivered");
@@ -2217,9 +2225,9 @@ const Orders = () => {
           </DialogContent>
         </Dialog>
 
-        <OrderDetailSheet open={sheetOpen} onOpenChange={setSheetOpen} order={selectedOrder} onUpdate={fetchOrders} />
+        <OrderDetailSheet open={sheetOpen} onOpenChange={setSheetOpen} order={selectedOrder} onUpdate={invalidateOrders} />
 
-        <OrderCreateDialog open={createDialogOpen} onOpenChange={setCreateDialogOpen} onSuccess={fetchOrders} />
+        <OrderCreateDialog open={createDialogOpen} onOpenChange={setCreateDialogOpen} onSuccess={invalidateOrders} />
       </div>
     </DashboardLayout>
   );
