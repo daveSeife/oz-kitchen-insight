@@ -986,15 +986,22 @@ const Orders = () => {
     const recovery = filteredOrderedMeals.filter((row) => isRecoveryMealStatus(row.meal.status));
     const cancelled = filteredOrderedMeals.filter((row) => isInactiveMealStatus(row.meal.status));
 
+    const deliveredCount = getMealQuantityTotal(delivered);
+    const remainingCount = getMealQuantityTotal(remaining);
+    const recoveryCount = getMealQuantityTotal(recovery);
+    const cancelledCount = getMealQuantityTotal(cancelled);
+    const totalCount = getMealQuantityTotal(filteredOrderedMeals);
+
     return {
       delivered,
       remaining,
       recovery,
       cancelled,
-      deliveredCount: getMealQuantityTotal(delivered),
-      remainingCount: getMealQuantityTotal(remaining),
-      recoveryCount: getMealQuantityTotal(recovery),
-      cancelledCount: getMealQuantityTotal(cancelled),
+      deliveredCount,
+      remainingCount,
+      recoveryCount,
+      cancelledCount,
+      totalCount,
     };
   }, [filteredOrderedMeals]);
 
@@ -1542,21 +1549,25 @@ const Orders = () => {
               </Button>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-4">
+            <div className="grid gap-4 md:grid-cols-5">
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
-                <p className="text-sm font-medium text-muted-foreground">Scheduled Meals</p>
-                <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.remainingCount}</p>
+                <p className="text-sm font-medium text-muted-foreground">Total Meals (units)</p>
+                <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.totalCount}</p>
               </motion.div>
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.1 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
-                <p className="text-sm font-medium text-muted-foreground">Delivered Meals</p>
-                <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.deliveredCount}</p>
+                <p className="text-sm font-medium text-muted-foreground">Scheduled (units)</p>
+                <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.remainingCount}</p>
               </motion.div>
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.2 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
-                <p className="text-sm font-medium text-muted-foreground">Recovery Queue</p>
-                <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.recoveryCount}</p>
+                <p className="text-sm font-medium text-muted-foreground">Delivered (units)</p>
+                <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.deliveredCount}</p>
               </motion.div>
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.3 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
-                <p className="text-sm font-medium text-muted-foreground">Cancelled / Refunded</p>
+                <p className="text-sm font-medium text-muted-foreground">Recovery Queue (units)</p>
+                <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.recoveryCount}</p>
+              </motion.div>
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.4 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
+                <p className="text-sm font-medium text-muted-foreground">Cancelled / Refunded (units)</p>
                 <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.cancelledCount}</p>
               </motion.div>
             </div>
