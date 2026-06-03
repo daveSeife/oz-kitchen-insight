@@ -3,14 +3,18 @@ import { format } from "date-fns";
 import {
   AlertTriangle,
   Calendar,
+  CalendarX,
   CheckCircle2,
+  ClipboardList,
   Clock3,
+  CreditCard,
   Download,
   MoreVertical,
   Plus,
   RotateCcw,
   Search,
   ShoppingBag,
+  UserCheck,
   Wallet,
   XCircle,
 } from "lucide-react";
@@ -126,8 +130,44 @@ interface LatestPaymentRecord {
 
 type MealAdminAction = "missed" | "rescheduled" | "cancelled" | "refunded";
 type OrdersQueryData = { orders: Order[]; isAdmin: boolean };
+type OperationalFilter =
+  | "all"
+  | "scheduled"
+  | "delivered"
+  | "recovery"
+  | "cancelled"
+  | "payment-pending"
+  | "pending-delivery"
+  | "requires-action"
+  | "unaccounted";
+type SubscriptionFilter =
+  | "all"
+  | "active"
+  | "completing-soon"
+  | "completed"
+  | "no-meals-scheduled"
+  | "payment-pending"
+  | "requires-action";
+
+interface SubscriptionDashboardRow {
+  id: string;
+  userId: string;
+  customerName: string;
+  phone: string;
+  planName: string;
+  status: string;
+  paymentStatus: string;
+  startDate: string;
+  endDate: string;
+  remainingMeals: number;
+  hasFutureMeals: boolean;
+  nextMealDate: string | null;
+}
 
 export const ORDERS_QUERY_KEY = ["orders"] as const;
+const SUBSCRIPTIONS_QUERY_KEY = ["subscriptions-dashboard"] as const;
+const LOW_REMAINING_MEALS_THRESHOLD = 3;
+const VALID_MEAL_STATUSES = new Set(["scheduled", "delivered", "missed", "rescheduled", "modified", "cancelled", "refunded"]);
 
 const WEEKDAY_COLUMNS = [
   { label: "Monday", shortLabel: "Mon", dayOffset: 0 },
@@ -375,6 +415,37 @@ const isInactiveMealStatus = (status: NormalizedOrderMealStatus) =>
 const isRecoveryMealStatus = (status: NormalizedOrderMealStatus) =>
   status === "missed" || status === "rescheduled" || status === "modified";
 
+const isPendingPaymentStatus = (paymentStatus?: string | null) => !isPaymentConfirmed(paymentStatus) && !isExcludedPaymentStatus(paymentStatus);
+
+const getMealDateTime = (meal: NormalizedOrderMeal) => {
+  if (!meal.scheduled_date) return null;
+
+  const timeMatch = (meal.scheduled_time_slot || "").match(/(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?/i);
+  const date = new Date(meal.scheduled_date);
+
+  if (timeMatch) {
+    let hours = Number(timeMatch[1]);
+    const minutes = Number(timeMatch[2] || 0);
+    const meridiem = timeMatch[3]?.toUpperCase();
+
+    if (meridiem === "PM" && hours < 12) hours += 12;
+    if (meridiem === "AM" && hours === 12) hours = 0;
+    date.setHours(hours, minutes, 0, 0);
+  } else {
+    date.setHours(23, 59, 59, 999);
+  }
+
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const isPendingDeliveryMeal = (row: OrderedMealRow) => {
+  if (row.meal.status === "delivered" || isInactiveMealStatus(row.meal.status)) return false;
+  const scheduledAt = getMealDateTime(row.meal);
+  return scheduledAt ? scheduledAt < new Date() : false;
+};
+
+const isUnaccountedMeal = (row: OrderedMealRow) => !VALID_MEAL_STATUSES.has(row.meal.status);
+
 const deriveOrderStatusFromMeals = (meals: NormalizedOrderMeal[], currentStatus?: string | null): OrderStatus => {
   if (meals.length === 0) {
     return (currentStatus as OrderStatus) || "pending";
@@ -415,6 +486,8 @@ const Orders = () => {
   const [selectedWeekDate, setSelectedWeekDate] = useState<Date>(new Date());
   const [selectedTimeSlot, setSelectedTimeSlot] = useState("all");
   const [selectedMealType, setSelectedMealType] = useState("all");
+  const [operationalFilter, setOperationalFilter] = useState<OperationalFilter>("all");
+  const [subscriptionFilter, setSubscriptionFilter] = useState<SubscriptionFilter>("all");
   const [updatingMealId, setUpdatingMealId] = useState<string | null>(null);
   const [selectedMealRowKeys, setSelectedMealRowKeys] = useState<string[]>([]);
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
@@ -627,6 +700,68 @@ const Orders = () => {
     return { orders: normalizedOrders, isAdmin: currentUserIsAdmin };
   };
 
+  const fetchSubscriptions = async () => {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) return [];
+
+    const adminAccess = await getAdminAccess(user.id);
+    const currentUserIsAdmin = adminAccess.hasAccess;
+
+    let subscriptionsQuery = supabase
+      .from("user_subscriptions")
+      .select("id, user_id, plan_id, status, payment_status, start_date, end_date, created_at")
+      .order("created_at", { ascending: false });
+
+    if (!currentUserIsAdmin) {
+      subscriptionsQuery = subscriptionsQuery.eq("user_id", user.id);
+    }
+
+    const { data: subscriptionRows, error: subscriptionsError } = await subscriptionsQuery;
+    if (subscriptionsError) throw subscriptionsError;
+
+    const userIds = Array.from(new Set((subscriptionRows || []).map((subscription) => subscription.user_id)));
+    const planIds = Array.from(new Set((subscriptionRows || []).map((subscription) => subscription.plan_id)));
+
+    const [{ data: profilesData, error: profilesError }, { data: plansData, error: plansError }] =
+      await Promise.all([
+        userIds.length > 0
+          ? supabase.from("profiles").select("id, first_name, last_name, phone_number").in("id", userIds)
+          : Promise.resolve({ data: [], error: null }),
+        planIds.length > 0
+          ? supabase.from("subscription_plans").select("id, name").in("id", planIds)
+          : Promise.resolve({ data: [], error: null }),
+      ]);
+
+    if (profilesError) throw profilesError;
+    if (plansError) throw plansError;
+
+    const profileMap = new Map((profilesData || []).map((profile) => [profile.id, profile]));
+    const planMap = new Map((plansData || []).map((plan) => [plan.id, plan]));
+
+    return (subscriptionRows || []).map((subscription) => {
+      const profile = profileMap.get(subscription.user_id);
+      const plan = planMap.get(subscription.plan_id);
+
+      return {
+        id: subscription.id,
+        userId: subscription.user_id,
+        customerName: `${profile?.first_name || ""} ${profile?.last_name || ""}`.trim() || "Unknown user",
+        phone: profile?.phone_number || "",
+        planName: plan?.name || "Unknown plan",
+        status: subscription.status || "unknown",
+        paymentStatus: subscription.payment_status || "pending",
+        startDate: subscription.start_date,
+        endDate: subscription.end_date,
+        remainingMeals: 0,
+        hasFutureMeals: false,
+        nextMealDate: null,
+      } satisfies SubscriptionDashboardRow;
+    });
+  };
+
   const {
     data: ordersQueryData,
     error: ordersError,
@@ -642,7 +777,22 @@ const Orders = () => {
     retry: 1,
   });
 
-  const orders = ordersQueryData?.orders || [];
+  const {
+    data: subscriptionRows = [],
+    error: subscriptionsError,
+    isLoading: subscriptionsLoading,
+  } = useQuery({
+    queryKey: SUBSCRIPTIONS_QUERY_KEY,
+    queryFn: fetchSubscriptions,
+    staleTime: Infinity,
+    gcTime: 30 * 60 * 1000,
+    refetchOnMount: true,
+    refetchOnReconnect: false,
+    refetchOnWindowFocus: false,
+    retry: 1,
+  });
+
+  const orders = useMemo(() => ordersQueryData?.orders || [], [ordersQueryData?.orders]);
   const isAdmin = ordersQueryData?.isAdmin || false;
   const selectedOrderId = selectedOrder?.id;
 
@@ -661,6 +811,12 @@ const Orders = () => {
     console.error("[Orders] fetchOrders error", ordersError);
     toast.error("Failed to fetch orders");
   }, [ordersError]);
+
+  useEffect(() => {
+    if (!subscriptionsError) return;
+    console.error("[Orders] fetchSubscriptions error", subscriptionsError);
+    toast.error("Failed to fetch subscriptions");
+  }, [subscriptionsError]);
 
   const updateOrderStatus = async (orderId: string, newStatus: string) => {
     try {
@@ -960,7 +1116,7 @@ const Orders = () => {
     ).sort();
   }, [orderedMealRows]);
 
-  const filteredOrderedMeals = useMemo(() => {
+  const baseFilteredOrderedMeals = useMemo(() => {
     return orderedMealRows.filter((row) => {
       const haystack = [
         row.fullName,
@@ -983,35 +1139,171 @@ const Orders = () => {
     });
   }, [orderedMealRows, search, selectedMealDate, selectedMealType, selectedTimeSlot]);
 
+  const filteredOrderedMeals = useMemo(() => {
+    return baseFilteredOrderedMeals.filter((row) => {
+      if (operationalFilter === "all") return true;
+      if (operationalFilter === "scheduled") {
+        return (
+          row.meal.status !== "delivered" &&
+          !isInactiveMealStatus(row.meal.status) &&
+          !isRecoveryMealStatus(row.meal.status)
+        );
+      }
+      if (operationalFilter === "delivered") return row.meal.status === "delivered";
+      if (operationalFilter === "recovery") return isRecoveryMealStatus(row.meal.status);
+      if (operationalFilter === "cancelled") return isInactiveMealStatus(row.meal.status);
+      if (operationalFilter === "payment-pending") return isPendingPaymentStatus(row.order.payment_status);
+      if (operationalFilter === "pending-delivery") return isPendingDeliveryMeal(row);
+      if (operationalFilter === "requires-action") {
+        return isPendingPaymentStatus(row.order.payment_status) || isPendingDeliveryMeal(row) || isRecoveryMealStatus(row.meal.status);
+      }
+      if (operationalFilter === "unaccounted") return isUnaccountedMeal(row);
+
+      return true;
+    });
+  }, [baseFilteredOrderedMeals, operationalFilter]);
+
   const orderedMealsSummary = useMemo(() => {
-    const delivered = filteredOrderedMeals.filter((row) => row.meal.status === "delivered");
-    const remaining = filteredOrderedMeals.filter(
+    const delivered = baseFilteredOrderedMeals.filter((row) => row.meal.status === "delivered");
+    const remaining = baseFilteredOrderedMeals.filter(
       (row) =>
         row.meal.status !== "delivered" &&
         !isInactiveMealStatus(row.meal.status) &&
         !isRecoveryMealStatus(row.meal.status),
     );
-    const recovery = filteredOrderedMeals.filter((row) => isRecoveryMealStatus(row.meal.status));
-    const cancelled = filteredOrderedMeals.filter((row) => isInactiveMealStatus(row.meal.status));
+    const recovery = baseFilteredOrderedMeals.filter((row) => isRecoveryMealStatus(row.meal.status));
+    const cancelled = baseFilteredOrderedMeals.filter((row) => isInactiveMealStatus(row.meal.status));
+    const paymentPending = baseFilteredOrderedMeals.filter((row) => isPendingPaymentStatus(row.order.payment_status));
+    const pendingDelivery = baseFilteredOrderedMeals.filter((row) => isPendingDeliveryMeal(row));
+    const requiresAction = baseFilteredOrderedMeals.filter(
+      (row) => isPendingPaymentStatus(row.order.payment_status) || isPendingDeliveryMeal(row) || isRecoveryMealStatus(row.meal.status),
+    );
+    const unaccounted = baseFilteredOrderedMeals.filter((row) => isUnaccountedMeal(row));
 
     const deliveredCount = getMealQuantityTotal(delivered);
     const remainingCount = getMealQuantityTotal(remaining);
     const recoveryCount = getMealQuantityTotal(recovery);
     const cancelledCount = getMealQuantityTotal(cancelled);
-    const totalCount = getMealQuantityTotal(filteredOrderedMeals);
+    const paymentPendingCount = getMealQuantityTotal(paymentPending);
+    const pendingDeliveryCount = getMealQuantityTotal(pendingDelivery);
+    const requiresActionCount = getMealQuantityTotal(requiresAction);
+    const unaccountedCount = getMealQuantityTotal(unaccounted);
+    const totalCount = getMealQuantityTotal(baseFilteredOrderedMeals);
 
     return {
       delivered,
       remaining,
       recovery,
       cancelled,
+      paymentPending,
+      pendingDelivery,
+      requiresAction,
+      unaccounted,
       deliveredCount,
       remainingCount,
       recoveryCount,
       cancelledCount,
+      paymentPendingCount,
+      pendingDeliveryCount,
+      requiresActionCount,
+      unaccountedCount,
       totalCount,
     };
-  }, [filteredOrderedMeals]);
+  }, [baseFilteredOrderedMeals]);
+
+  const subscriptionsDashboard = useMemo(() => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const futureMealsByUser = new Map<string, OrderedMealRow[]>();
+    for (const row of orderedMealRows) {
+      if (isInactiveMealStatus(row.meal.status) || row.meal.status === "delivered") continue;
+      const scheduledAt = getMealDateTime(row.meal);
+      if (!scheduledAt || scheduledAt < today) continue;
+
+      const existing = futureMealsByUser.get(row.order.user_id) || [];
+      existing.push(row);
+      futureMealsByUser.set(row.order.user_id, existing);
+    }
+
+    const rows = subscriptionRows.map((subscription) => {
+      const futureMeals = futureMealsByUser.get(subscription.userId) || [];
+      const sortedFutureMeals = [...futureMeals].sort((left, right) => {
+        const leftTime = getMealDateTime(left.meal)?.getTime() || Number.MAX_SAFE_INTEGER;
+        const rightTime = getMealDateTime(right.meal)?.getTime() || Number.MAX_SAFE_INTEGER;
+        return leftTime - rightTime;
+      });
+
+      return {
+        ...subscription,
+        remainingMeals: getMealQuantityTotal(futureMeals),
+        hasFutureMeals: futureMeals.length > 0,
+        nextMealDate: sortedFutureMeals[0]?.meal.scheduled_date || null,
+      };
+    });
+
+    const isActiveSubscription = (subscription: SubscriptionDashboardRow) => {
+      const status = subscription.status.toLowerCase();
+      const inactiveStatuses = new Set(["cancelled", "canceled", "expired", "inactive", "failed", "completed"]);
+      const endDate = new Date(subscription.endDate);
+
+      return !inactiveStatuses.has(status) && (Number.isNaN(endDate.getTime()) || endDate >= today);
+    };
+
+    const isCompletedSubscription = (subscription: SubscriptionDashboardRow) => {
+      const status = subscription.status.toLowerCase();
+      const endDate = new Date(subscription.endDate);
+      return status === "completed" || status === "expired" || (!Number.isNaN(endDate.getTime()) && endDate < today);
+    };
+
+    const active = rows.filter(isActiveSubscription);
+    const completingSoon = rows.filter(
+      (subscription) => isActiveSubscription(subscription) && subscription.remainingMeals > 0 && subscription.remainingMeals <= LOW_REMAINING_MEALS_THRESHOLD,
+    );
+    const completed = rows.filter(isCompletedSubscription);
+    const noMealsScheduled = rows.filter((subscription) => isActiveSubscription(subscription) && !subscription.hasFutureMeals);
+    const paymentPending = rows.filter((subscription) => isPendingPaymentStatus(subscription.paymentStatus));
+    const requiresAction = rows.filter(
+      (subscription) =>
+        completingSoon.some((row) => row.id === subscription.id) ||
+        noMealsScheduled.some((row) => row.id === subscription.id) ||
+        paymentPending.some((row) => row.id === subscription.id),
+    );
+
+    const filteredRows = rows.filter((subscription) => {
+      const haystack = [
+        subscription.customerName,
+        subscription.phone,
+        subscription.planName,
+        subscription.status,
+        subscription.paymentStatus,
+      ]
+        .join(" ")
+        .toLowerCase();
+
+      if (!haystack.includes(search.toLowerCase())) return false;
+      if (subscriptionFilter === "all") return true;
+      if (subscriptionFilter === "active") return active.some((row) => row.id === subscription.id);
+      if (subscriptionFilter === "completing-soon") return completingSoon.some((row) => row.id === subscription.id);
+      if (subscriptionFilter === "completed") return completed.some((row) => row.id === subscription.id);
+      if (subscriptionFilter === "no-meals-scheduled") return noMealsScheduled.some((row) => row.id === subscription.id);
+      if (subscriptionFilter === "payment-pending") return paymentPending.some((row) => row.id === subscription.id);
+      if (subscriptionFilter === "requires-action") return requiresAction.some((row) => row.id === subscription.id);
+
+      return true;
+    });
+
+    return {
+      rows,
+      filteredRows,
+      activeCount: active.length,
+      completingSoonCount: completingSoon.length,
+      completedCount: completed.length,
+      noMealsScheduledCount: noMealsScheduled.length,
+      paymentPendingCount: paymentPending.length,
+      requiresActionCount: requiresAction.length,
+    };
+  }, [orderedMealRows, search, subscriptionFilter, subscriptionRows]);
 
   const filteredOrderedMealKeys = useMemo(
     () => filteredOrderedMeals.map(getOrderedMealRowKey),
@@ -1422,6 +1714,39 @@ const Orders = () => {
     toast.success("Weekly meals exported successfully");
   };
 
+  const operationalMetrics: Array<{
+    key: OperationalFilter;
+    label: string;
+    value: number;
+    icon: typeof ShoppingBag;
+    tone: string;
+  }> = [
+    { key: "all", label: "Total Meals (units)", value: orderedMealsSummary.totalCount, icon: ShoppingBag, tone: "text-primary bg-primary/10" },
+    { key: "scheduled", label: "Scheduled", value: orderedMealsSummary.remainingCount, icon: Calendar, tone: "text-amber-700 bg-amber-100" },
+    { key: "delivered", label: "Delivered", value: orderedMealsSummary.deliveredCount, icon: CheckCircle2, tone: "text-emerald-700 bg-emerald-100" },
+    { key: "recovery", label: "Recovery", value: orderedMealsSummary.recoveryCount, icon: RotateCcw, tone: "text-orange-700 bg-orange-100" },
+    { key: "cancelled", label: "Cancelled", value: orderedMealsSummary.cancelledCount, icon: XCircle, tone: "text-rose-700 bg-rose-100" },
+    { key: "payment-pending", label: "Payment Pending", value: orderedMealsSummary.paymentPendingCount, icon: CreditCard, tone: "text-amber-700 bg-amber-100" },
+    { key: "pending-delivery", label: "Pending Delivery", value: orderedMealsSummary.pendingDeliveryCount, icon: Clock3, tone: "text-sky-700 bg-sky-100" },
+    { key: "requires-action", label: "Orders Requiring Action", value: orderedMealsSummary.requiresActionCount, icon: AlertTriangle, tone: "text-red-700 bg-red-100" },
+    { key: "unaccounted", label: "Unaccounted Orders", value: orderedMealsSummary.unaccountedCount, icon: ClipboardList, tone: "text-slate-700 bg-slate-100" },
+  ];
+
+  const subscriptionMetrics: Array<{
+    key: SubscriptionFilter;
+    label: string;
+    value: number;
+    icon: typeof ShoppingBag;
+    tone: string;
+  }> = [
+    { key: "active", label: "Active Subscriptions", value: subscriptionsDashboard.activeCount, icon: UserCheck, tone: "text-emerald-700 bg-emerald-100" },
+    { key: "completing-soon", label: "Completing Soon", value: subscriptionsDashboard.completingSoonCount, icon: Clock3, tone: "text-amber-700 bg-amber-100" },
+    { key: "completed", label: "Subscription Completed", value: subscriptionsDashboard.completedCount, icon: CheckCircle2, tone: "text-slate-700 bg-slate-100" },
+    { key: "no-meals-scheduled", label: "No Meals Scheduled", value: subscriptionsDashboard.noMealsScheduledCount, icon: CalendarX, tone: "text-sky-700 bg-sky-100" },
+    { key: "payment-pending", label: "Payment Pending", value: subscriptionsDashboard.paymentPendingCount, icon: CreditCard, tone: "text-amber-700 bg-amber-100" },
+    { key: "requires-action", label: "Requires Action", value: subscriptionsDashboard.requiresActionCount, icon: AlertTriangle, tone: "text-red-700 bg-red-100" },
+  ];
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
@@ -1444,6 +1769,9 @@ const Orders = () => {
               <TabsTrigger value="weekly-meals" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm">
                 Weekly Meals
               </TabsTrigger>
+              <TabsTrigger value="subscriptions" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm">
+                Subscriptions
+              </TabsTrigger>
               <TabsTrigger value="orders" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm">
                 Orders View
               </TabsTrigger>
@@ -1458,7 +1786,9 @@ const Orders = () => {
                       ? "Search customer, phone, meal, location..."
                       : activeTab === "weekly-meals"
                         ? "Search weekly meals..."
-                      : "Search order number, customer, phone..."
+                        : activeTab === "subscriptions"
+                          ? "Search subscriptions..."
+                          : "Search order number, customer, phone..."
                   }
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
@@ -1557,28 +1887,42 @@ const Orders = () => {
               </Button>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-5">
-              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
-                <p className="text-sm font-medium text-muted-foreground">Total Meals (units)</p>
-                <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.totalCount}</p>
-              </motion.div>
-              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.1 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
-                <p className="text-sm font-medium text-muted-foreground">Scheduled (units)</p>
-                <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.remainingCount}</p>
-              </motion.div>
-              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.2 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
-                <p className="text-sm font-medium text-muted-foreground">Delivered (units)</p>
-                <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.deliveredCount}</p>
-              </motion.div>
-              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.3 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
-                <p className="text-sm font-medium text-muted-foreground">Recovery Queue (units)</p>
-                <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.recoveryCount}</p>
-              </motion.div>
-              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.4 }} className="rounded-xl border border-border/50 bg-card p-5 shadow-card">
-                <p className="text-sm font-medium text-muted-foreground">Cancelled / Refunded (units)</p>
-                <p className="text-3xl font-heading font-bold text-foreground mt-1">{orderedMealsSummary.cancelledCount}</p>
-              </motion.div>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+              {operationalMetrics.map((metric, index) => {
+                const Icon = metric.icon;
+                const isActive = operationalFilter === metric.key;
+
+                return (
+                  <motion.button
+                    key={metric.key}
+                    type="button"
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3, delay: index * 0.04 }}
+                    onClick={() => setOperationalFilter(metric.key)}
+                    className={`rounded-xl border bg-card p-5 text-left shadow-card transition hover:-translate-y-0.5 hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                      isActive ? "border-primary ring-2 ring-primary/20" : "border-border/50"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-medium text-muted-foreground">{metric.label}</p>
+                        <p className="text-3xl font-heading font-bold text-foreground mt-1">{metric.value}</p>
+                      </div>
+                      <span className={`w-10 h-10 rounded-lg flex items-center justify-center ${metric.tone}`}>
+                        <Icon className="w-5 h-5" />
+                      </span>
+                    </div>
+                  </motion.button>
+                );
+              })}
             </div>
+
+            {operationalFilter !== "all" && (
+              <Button variant="ghost" className="rounded-xl h-9 text-muted-foreground" onClick={() => setOperationalFilter("all")}>
+                Clear status filter
+              </Button>
+            )}
 
             <div className="grid gap-6">
               <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.3 }} className="rounded-xl border border-border/50 bg-card shadow-card overflow-hidden">
@@ -1892,6 +2236,107 @@ const Orders = () => {
                     ))
                   )}
                 </div>
+              </div>
+            </motion.div>
+          </TabsContent>
+
+          <TabsContent value="subscriptions" className="space-y-6 mt-6">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {subscriptionMetrics.map((metric, index) => {
+                const Icon = metric.icon;
+                const isActive = subscriptionFilter === metric.key;
+
+                return (
+                  <motion.button
+                    key={metric.key}
+                    type="button"
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3, delay: index * 0.04 }}
+                    onClick={() => setSubscriptionFilter(metric.key)}
+                    className={`rounded-xl border bg-card p-5 text-left shadow-card transition hover:-translate-y-0.5 hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                      isActive ? "border-primary ring-2 ring-primary/20" : "border-border/50"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-medium text-muted-foreground">{metric.label}</p>
+                        <p className="text-3xl font-heading font-bold text-foreground mt-1">{metric.value}</p>
+                      </div>
+                      <span className={`w-10 h-10 rounded-lg flex items-center justify-center ${metric.tone}`}>
+                        <Icon className="w-5 h-5" />
+                      </span>
+                    </div>
+                  </motion.button>
+                );
+              })}
+            </div>
+
+            {subscriptionFilter !== "all" && (
+              <Button variant="ghost" className="rounded-xl h-9 text-muted-foreground" onClick={() => setSubscriptionFilter("all")}>
+                Clear subscription filter
+              </Button>
+            )}
+
+            <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="rounded-xl border border-border/50 bg-card shadow-card overflow-hidden">
+              <div className="overflow-x-auto">
+                <Table className="modern-table min-w-[940px]">
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent border-border/50">
+                      <TableHead className="min-w-[190px]">Subscriber</TableHead>
+                      <TableHead className="min-w-[170px]">Plan</TableHead>
+                      <TableHead className="w-[130px]">Status</TableHead>
+                      <TableHead className="w-[140px]">Payment</TableHead>
+                      <TableHead className="w-[130px]">Remaining</TableHead>
+                      <TableHead className="w-[130px]">Next Meal</TableHead>
+                      <TableHead className="w-[130px]">Ends</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {subscriptionsLoading ? (
+                      <TableRow>
+                        <TableCell colSpan={7} className="text-center py-12">
+                          <div className="flex flex-col items-center gap-3">
+                            <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+                            <p className="text-sm text-muted-foreground">Loading subscriptions...</p>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ) : subscriptionsDashboard.filteredRows.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={7} className="text-center py-12">
+                          <div className="flex flex-col items-center gap-3">
+                            <UserCheck className="w-10 h-10 text-muted-foreground/30" />
+                            <p className="text-sm text-muted-foreground">No subscriptions found</p>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      subscriptionsDashboard.filteredRows.map((subscription) => (
+                        <TableRow key={subscription.id} className="border-border/50">
+                          <TableCell>
+                            <p className="font-semibold text-foreground">{subscription.customerName}</p>
+                            <p className="text-xs text-muted-foreground tabular-nums">{subscription.phone || "-"}</p>
+                          </TableCell>
+                          <TableCell className="font-medium text-foreground">{subscription.planName}</TableCell>
+                          <TableCell>
+                            <Badge variant="outline" className="text-[10px] border-0 ring-1 ring-inset bg-muted/70 text-muted-foreground">
+                              {subscription.status}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline" className={`text-[10px] border-0 ring-1 ring-inset ${getPaymentStatusTone(subscription.paymentStatus)}`}>
+                              {formatPaymentStatus(subscription.paymentStatus)}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="font-semibold tabular-nums">{subscription.remainingMeals}</TableCell>
+                          <TableCell className="text-muted-foreground tabular-nums">{subscription.nextMealDate || "-"}</TableCell>
+                          <TableCell className="text-muted-foreground tabular-nums">{new Date(subscription.endDate).toLocaleDateString()}</TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
               </div>
             </motion.div>
           </TabsContent>
