@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { toast } from "sonner";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
 import { OrderCreateDialog } from "@/components/orders/OrderCreateDialog";
@@ -129,7 +129,7 @@ interface LatestPaymentRecord {
 }
 
 type MealAdminAction = "missed" | "rescheduled" | "cancelled" | "refunded";
-type OrdersQueryData = { orders: Order[]; isAdmin: boolean };
+type OrdersQueryData = { orders: Order[]; isAdmin: boolean; hasMore: boolean; nextOffset: number };
 type OperationalFilter =
   | "all"
   | "scheduled"
@@ -166,6 +166,11 @@ interface SubscriptionDashboardRow {
 
 export const ORDERS_QUERY_KEY = ["orders"] as const;
 const SUBSCRIPTIONS_QUERY_KEY = ["subscriptions-dashboard"] as const;
+const ORDER_MEALS_PAGE_SIZE = 250;
+const INITIAL_VISIBLE_ORDER_MEALS = 250;
+const INITIAL_VISIBLE_ORDERS = 100;
+const INITIAL_VISIBLE_DELIVERIES = 200;
+const INITIAL_VISIBLE_WEEKLY_CUSTOMERS = 100;
 const LOW_REMAINING_MEALS_THRESHOLD = 3;
 const VALID_MEAL_STATUSES = new Set(["scheduled", "delivered", "missed", "rescheduled", "modified", "cancelled", "refunded"]);
 
@@ -481,8 +486,7 @@ const Orders = () => {
   const [activeTab, setActiveTab] = useState("ordered-meals");
   const [startDate, setStartDate] = useState<Date | undefined>(undefined);
   const [endDate, setEndDate] = useState<Date | undefined>(undefined);
-  const [deliveryDateFilter, setDeliveryDateFilter] = useState<Date | undefined>(undefined);
-  const [selectedMealDate, setSelectedMealDate] = useState<Date | undefined>(undefined);
+  const [selectedMealDate, setSelectedMealDate] = useState<Date>(new Date());
   const [selectedWeekDate, setSelectedWeekDate] = useState<Date>(new Date());
   const [selectedTimeSlot, setSelectedTimeSlot] = useState("all");
   const [selectedMealType, setSelectedMealType] = useState("all");
@@ -498,6 +502,11 @@ const Orders = () => {
   const [recoveryReason, setRecoveryReason] = useState("");
   const [recoveryNotes, setRecoveryNotes] = useState("");
   const [recoveryRefundAmount, setRecoveryRefundAmount] = useState("");
+  const [visibleOrderedMealCount, setVisibleOrderedMealCount] = useState(INITIAL_VISIBLE_ORDER_MEALS);
+  const [visibleOrderCount, setVisibleOrderCount] = useState(INITIAL_VISIBLE_ORDERS);
+  const [visibleDeliveryCount, setVisibleDeliveryCount] = useState(INITIAL_VISIBLE_DELIVERIES);
+  const [visibleWeeklyCustomerCount, setVisibleWeeklyCustomerCount] = useState(INITIAL_VISIBLE_WEEKLY_CUSTOMERS);
+  const selectedMealDateKey = useMemo(() => toDateKey(selectedMealDate), [selectedMealDate]);
 
   const formatPaymentStatus = (value?: string | null) => {
     if (!value) return "pending";
@@ -554,150 +563,187 @@ const Orders = () => {
     void queryClient.invalidateQueries({ queryKey: ORDERS_QUERY_KEY });
   }, [queryClient]);
 
-  const fetchOrders = async () => {
+  const normalizeOrders = async (
+    ordersData: Tables<"orders">[],
+    paymentsData: LatestPaymentRecord[],
+    orderMealsData: OrderMealRowRecord[] | null,
+    profilesData: Array<{ id: string; first_name: string | null; last_name: string | null; phone_number: string | null }>,
+  ) => {
+    const profileMap = Object.fromEntries(
+      (profilesData || []).map((profile) => [
+        profile.id,
+        {
+          first_name: profile.first_name || "",
+          last_name: profile.last_name || "",
+          phone_number: profile.phone_number || "",
+        },
+      ]),
+    );
+
+    const latestPaymentByOrder = new Map<string, LatestPaymentRecord>();
+    for (const payment of paymentsData || []) {
+      if (!latestPaymentByOrder.has(payment.order_id)) {
+        latestPaymentByOrder.set(payment.order_id, payment);
+      }
+    }
+
+    const mealsByOrder = new Map<string, NormalizedOrderMeal[]>();
+    const fallbackMealsByOrder = new Map<string, NormalizedOrderMeal[]>();
+    const mealIds = new Set<string>();
+
+    for (const row of orderMealsData || []) {
+      const normalized = normalizeOrderMealRow(row);
+      const existing = mealsByOrder.get(normalized.order_id) || [];
+      existing.push(normalized);
+      mealsByOrder.set(normalized.order_id, existing);
+      if (normalized.meal_id) {
+        mealIds.add(normalized.meal_id);
+      }
+    }
+
+    for (const order of ordersData || []) {
+      const payment = latestPaymentByOrder.get(order.id);
+      const fallbackMeals = parseLegacyMealSnapshot(
+        order.id,
+        payment?.payment_gateway_response,
+        order.delivery_date,
+        order.delivery_time_slot,
+        payment?.id,
+      );
+
+      fallbackMealsByOrder.set(order.id, fallbackMeals);
+      for (const meal of fallbackMeals) {
+        if (meal.meal_id) {
+          mealIds.add(meal.meal_id);
+        }
+      }
+    }
+
+    const { data: mealCatalogData, error: mealCatalogError } =
+      mealIds.size > 0
+        ? await supabase.from("meals").select("id, name, meal_type").in("id", Array.from(mealIds))
+        : { data: [], error: null };
+
+    if (mealCatalogError) throw mealCatalogError;
+
+    const mealCatalogMap = new Map(
+      (mealCatalogData || []).map((meal) => [meal.id, meal]),
+    );
+
+    const enrichMeal = (meal: NormalizedOrderMeal): NormalizedOrderMeal => {
+      const catalogMeal = meal.meal_id ? mealCatalogMap.get(meal.meal_id) : null;
+
+      return {
+        ...meal,
+        meal_name: catalogMeal?.name || meal.meal_name,
+        // Keep the ordered meal type authoritative; only fall back to catalog when missing.
+        meal_type: normalizeMealType(meal.meal_type || catalogMeal?.meal_type),
+      };
+    };
+
+    return (ordersData || []).map((order) => {
+      const structuredMeals = (mealsByOrder.get(order.id) || []).map(enrichMeal);
+      const fallbackMeals = (fallbackMealsByOrder.get(order.id) || []).map(enrichMeal);
+
+      const meals = (structuredMeals.length > 0 ? structuredMeals : dedupeMeals(fallbackMeals)).sort((a, b) => {
+        const left = `${a.scheduled_date || ""} ${a.scheduled_time_slot || ""}`;
+        const right = `${b.scheduled_date || ""} ${b.scheduled_time_slot || ""}`;
+        return left.localeCompare(right);
+      });
+
+      return {
+        ...order,
+        status: order.status || "pending",
+        payment_status: order.payment_status || "pending",
+        profiles: profileMap[order.user_id] || { first_name: "", last_name: "", phone_number: "" },
+        meals,
+      };
+    });
+  };
+
+  const fetchOrders = async ({ pageParam = 0 }: { pageParam?: unknown }): Promise<OrdersQueryData> => {
+    const pageOffset = typeof pageParam === "number" ? pageParam : 0;
     const {
       data: { user },
     } = await supabase.auth.getUser();
 
     if (!user) {
-      return { orders: [], isAdmin: false };
+      return { orders: [], isAdmin: false, hasMore: false, nextOffset: 0 };
     }
 
     const adminAccess = await getAdminAccess(user.id);
     const currentUserIsAdmin = adminAccess.hasAccess;
 
-    let ordersQuery = supabase.from("orders").select("*");
+    const orderMealsQuery = supabase
+      .from("order_meals")
+      .select("*")
+      .eq("scheduled_date", selectedMealDateKey)
+      .order("scheduled_time_slot", { ascending: true })
+      .order("created_at", { ascending: true })
+      .range(pageOffset, pageOffset + ORDER_MEALS_PAGE_SIZE);
 
-    if (!currentUserIsAdmin) {
+    const { data: orderMealsPage, error: orderMealsPageError } = await orderMealsQuery;
+    if (orderMealsPageError && !isMissingOrderMealsTableError(orderMealsPageError)) {
+      throw orderMealsPageError;
+    }
+
+    const orderMealsData = ((orderMealsPage || []) as OrderMealRowRecord[]).slice(0, ORDER_MEALS_PAGE_SIZE);
+    const hasMoreOrderMeals = (orderMealsPage || []).length > ORDER_MEALS_PAGE_SIZE;
+    const orderIds = Array.from(new Set(orderMealsData.map((meal) => meal.order_id)));
+
+    let ordersQuery = orderIds.length > 0
+      ? supabase.from("orders").select("*").in("id", orderIds)
+      : null;
+
+    if (ordersQuery && !currentUserIsAdmin) {
       ordersQuery = ordersQuery.eq("user_id", user.id);
     }
 
-      const { data: ordersData, error: ordersError } = await ordersQuery.order("created_at", {
-        ascending: false,
-      });
+    const { data: fetchedOrders, error: ordersError } = ordersQuery
+      ? await ordersQuery
+      : { data: [], error: null };
 
-      if (ordersError) throw ordersError;
+    if (ordersError) throw ordersError;
 
-      const orderIds = (ordersData || []).map((order) => order.id);
-      const userIds = Array.from(new Set((ordersData || []).map((order) => order.user_id).filter(Boolean)));
+    const orderSort = new Map(orderIds.map((orderId, index) => [orderId, index]));
+    const ordersData = ((fetchedOrders || []) as Tables<"orders">[]).sort(
+      (left, right) => (orderSort.get(left.id) ?? 0) - (orderSort.get(right.id) ?? 0),
+    );
+    const visibleOrderIds = new Set(ordersData.map((order) => order.id));
+    const visibleOrderMealsData = orderMealsData.filter((meal) => visibleOrderIds.has(meal.order_id));
+    const userIds = Array.from(new Set(ordersData.map((order) => order.user_id).filter(Boolean)));
 
-      const [{ data: profilesData, error: profilesError }, { data: paymentsData, error: paymentsError }, orderMealsResponse] =
-        await Promise.all([
-          userIds.length > 0
-            ? supabase.from("profiles").select("id, first_name, last_name, phone_number").in("id", userIds)
-            : Promise.resolve({ data: [], error: null }),
-          orderIds.length > 0
-            ? supabase
-                .from("payments")
-                .select("id, order_id, payment_gateway_response, created_at")
-                .in("order_id", orderIds)
-                .order("created_at", { ascending: false })
-            : Promise.resolve({ data: [], error: null }),
-          orderIds.length > 0
-            ? supabase.from("order_meals").select("*").in("order_id", orderIds)
-            : Promise.resolve({ data: [], error: null }),
-        ]);
+    const [{ data: profilesData, error: profilesError }, { data: paymentsData, error: paymentsError }] =
+      await Promise.all([
+        userIds.length > 0
+          ? supabase.from("profiles").select("id, first_name, last_name, phone_number").in("id", userIds)
+          : Promise.resolve({ data: [], error: null }),
+        orderIds.length > 0
+          ? supabase
+              .from("payments")
+              .select("id, order_id, payment_gateway_response, created_at")
+              .in("order_id", orderIds)
+              .order("created_at", { ascending: false })
+          : Promise.resolve({ data: [], error: null }),
+      ]);
 
-      if (profilesError) throw profilesError;
-      if (paymentsError) throw paymentsError;
+    if (profilesError) throw profilesError;
+    if (paymentsError) throw paymentsError;
 
-      const orderMealsError = orderMealsResponse?.error;
-      if (orderMealsError && !isMissingOrderMealsTableError(orderMealsError)) {
-        throw orderMealsError;
-      }
+    const normalizedOrders = await normalizeOrders(
+      ordersData,
+      (paymentsData || []) as LatestPaymentRecord[],
+      visibleOrderMealsData,
+      profilesData || [],
+    );
 
-      const profileMap = Object.fromEntries(
-        (profilesData || []).map((profile) => [
-          profile.id,
-          {
-            first_name: profile.first_name || "",
-            last_name: profile.last_name || "",
-            phone_number: profile.phone_number || "",
-          },
-        ]),
-      );
-
-      const latestPaymentByOrder = new Map<string, LatestPaymentRecord>();
-      for (const payment of paymentsData || []) {
-        if (!latestPaymentByOrder.has(payment.order_id)) {
-          latestPaymentByOrder.set(payment.order_id, payment);
-        }
-      }
-
-      const mealsByOrder = new Map<string, NormalizedOrderMeal[]>();
-      const fallbackMealsByOrder = new Map<string, NormalizedOrderMeal[]>();
-      const mealIds = new Set<string>();
-
-      for (const row of (orderMealsResponse?.data as OrderMealRowRecord[] | null) || []) {
-        const normalized = normalizeOrderMealRow(row);
-        const existing = mealsByOrder.get(normalized.order_id) || [];
-        existing.push(normalized);
-        mealsByOrder.set(normalized.order_id, existing);
-        if (normalized.meal_id) {
-          mealIds.add(normalized.meal_id);
-        }
-      }
-
-      for (const order of ordersData || []) {
-        const payment = latestPaymentByOrder.get(order.id);
-        const fallbackMeals = parseLegacyMealSnapshot(
-          order.id,
-          payment?.payment_gateway_response,
-          order.delivery_date,
-          order.delivery_time_slot,
-          payment?.id,
-        );
-
-        fallbackMealsByOrder.set(order.id, fallbackMeals);
-        for (const meal of fallbackMeals) {
-          if (meal.meal_id) {
-            mealIds.add(meal.meal_id);
-          }
-        }
-      }
-
-      const { data: mealCatalogData, error: mealCatalogError } =
-        mealIds.size > 0
-          ? await supabase.from("meals").select("id, name, meal_type").in("id", Array.from(mealIds))
-          : { data: [], error: null };
-
-      if (mealCatalogError) throw mealCatalogError;
-
-      const mealCatalogMap = new Map(
-        (mealCatalogData || []).map((meal) => [meal.id, meal]),
-      );
-
-      const enrichMeal = (meal: NormalizedOrderMeal): NormalizedOrderMeal => {
-        const catalogMeal = meal.meal_id ? mealCatalogMap.get(meal.meal_id) : null;
-
-        return {
-          ...meal,
-          meal_name: catalogMeal?.name || meal.meal_name,
-          // Keep the ordered meal type authoritative; only fall back to catalog when missing.
-          meal_type: normalizeMealType(meal.meal_type || catalogMeal?.meal_type),
-        };
-      };
-
-      const normalizedOrders: Order[] = (ordersData || []).map((order) => {
-        const structuredMeals = (mealsByOrder.get(order.id) || []).map(enrichMeal);
-        const fallbackMeals = (fallbackMealsByOrder.get(order.id) || []).map(enrichMeal);
-
-        const meals = (structuredMeals.length > 0 ? structuredMeals : dedupeMeals(fallbackMeals)).sort((a, b) => {
-          const left = `${a.scheduled_date || ""} ${a.scheduled_time_slot || ""}`;
-          const right = `${b.scheduled_date || ""} ${b.scheduled_time_slot || ""}`;
-          return left.localeCompare(right);
-        });
-
-        return {
-          ...order,
-          status: order.status || "pending",
-          payment_status: order.payment_status || "pending",
-          profiles: profileMap[order.user_id] || { first_name: "", last_name: "", phone_number: "" },
-          meals,
-        };
-      });
-
-    return { orders: normalizedOrders, isAdmin: currentUserIsAdmin };
+    const nextOffset = pageOffset + ORDER_MEALS_PAGE_SIZE;
+    return {
+      orders: normalizedOrders,
+      isAdmin: currentUserIsAdmin,
+      hasMore: hasMoreOrderMeals,
+      nextOffset,
+    };
   };
 
   const fetchSubscriptions = async () => {
@@ -766,9 +812,14 @@ const Orders = () => {
     data: ordersQueryData,
     error: ordersError,
     isLoading: loading,
-  } = useQuery({
-    queryKey: ORDERS_QUERY_KEY,
+    isFetchingNextPage: loadingMoreOrders,
+    fetchNextPage,
+    hasNextPage,
+  } = useInfiniteQuery({
+    queryKey: [...ORDERS_QUERY_KEY, selectedMealDateKey],
     queryFn: fetchOrders,
+    initialPageParam: 0,
+    getNextPageParam: (lastPage) => (lastPage.hasMore ? lastPage.nextOffset : undefined),
     staleTime: Infinity,
     gcTime: 30 * 60 * 1000,
     refetchOnMount: true,
@@ -784,6 +835,7 @@ const Orders = () => {
   } = useQuery({
     queryKey: SUBSCRIPTIONS_QUERY_KEY,
     queryFn: fetchSubscriptions,
+    enabled: activeTab === "subscriptions",
     staleTime: Infinity,
     gcTime: 30 * 60 * 1000,
     refetchOnMount: true,
@@ -792,8 +844,19 @@ const Orders = () => {
     retry: 1,
   });
 
-  const orders = useMemo(() => ordersQueryData?.orders || [], [ordersQueryData?.orders]);
-  const isAdmin = ordersQueryData?.isAdmin || false;
+  const orders = useMemo(() => {
+    const orderMap = new Map<string, Order>();
+    for (const page of ordersQueryData?.pages || []) {
+      for (const order of page.orders) {
+        if (!orderMap.has(order.id)) {
+          orderMap.set(order.id, order);
+        }
+      }
+    }
+
+    return Array.from(orderMap.values());
+  }, [ordersQueryData?.pages]);
+  const isAdmin = ordersQueryData?.pages[0]?.isAdmin || false;
   const selectedOrderId = selectedOrder?.id;
 
   useEffect(() => {
@@ -1061,14 +1124,14 @@ const Orders = () => {
             999,
           );
 
-      const matchesDeliveryDate =
-        !deliveryDateFilter ||
-        order.meals.some((meal) => meal.scheduled_date === format(deliveryDateFilter, "yyyy-MM-dd")) ||
-        order.delivery_date === format(deliveryDateFilter, "yyyy-MM-dd");
-
-      return matchesSearch && matchesStartDate && matchesEndDate && matchesDeliveryDate;
+      return matchesSearch && matchesStartDate && matchesEndDate;
     });
-  }, [deliveryDateFilter, endDate, orders, search, startDate]);
+  }, [endDate, orders, search, startDate]);
+
+  const displayedFilteredOrders = useMemo(
+    () => filteredOrders.slice(0, visibleOrderCount),
+    [filteredOrders, visibleOrderCount],
+  );
 
   const orderedMealRows = useMemo<OrderedMealRow[]>(() => {
     const rows = orders.flatMap((order) => {
@@ -1163,6 +1226,11 @@ const Orders = () => {
     });
   }, [baseFilteredOrderedMeals, operationalFilter]);
 
+  const displayedFilteredOrderedMeals = useMemo(
+    () => filteredOrderedMeals.slice(0, visibleOrderedMealCount),
+    [filteredOrderedMeals, visibleOrderedMealCount],
+  );
+
   const orderedMealsSummary = useMemo(() => {
     const delivered = baseFilteredOrderedMeals.filter((row) => row.meal.status === "delivered");
     const remaining = baseFilteredOrderedMeals.filter(
@@ -1210,6 +1278,11 @@ const Orders = () => {
       totalCount,
     };
   }, [baseFilteredOrderedMeals]);
+
+  const displayedDeliveredMeals = useMemo(
+    () => orderedMealsSummary.delivered.slice(0, visibleDeliveryCount),
+    [orderedMealsSummary.delivered, visibleDeliveryCount],
+  );
 
   const subscriptionsDashboard = useMemo(() => {
     const today = new Date();
@@ -1306,8 +1379,8 @@ const Orders = () => {
   }, [orderedMealRows, search, subscriptionFilter, subscriptionRows]);
 
   const filteredOrderedMealKeys = useMemo(
-    () => filteredOrderedMeals.map(getOrderedMealRowKey),
-    [filteredOrderedMeals],
+    () => displayedFilteredOrderedMeals.map(getOrderedMealRowKey),
+    [displayedFilteredOrderedMeals],
   );
 
   const selectedOrderedMealRows = useMemo(
@@ -1404,6 +1477,24 @@ const Orders = () => {
       customers,
     };
   }, [orderedMealRows, search, selectedWeekDate]);
+
+  const displayedWeeklyCustomers = useMemo(
+    () => weeklyMealSchedule.customers.slice(0, visibleWeeklyCustomerCount),
+    [visibleWeeklyCustomerCount, weeklyMealSchedule.customers],
+  );
+
+  useEffect(() => {
+    setVisibleOrderedMealCount(INITIAL_VISIBLE_ORDER_MEALS);
+    setVisibleDeliveryCount(INITIAL_VISIBLE_DELIVERIES);
+  }, [operationalFilter, search, selectedMealDate, selectedMealType, selectedTimeSlot]);
+
+  useEffect(() => {
+    setVisibleOrderCount(INITIAL_VISIBLE_ORDERS);
+  }, [endDate, search, startDate]);
+
+  useEffect(() => {
+    setVisibleWeeklyCustomerCount(INITIAL_VISIBLE_WEEKLY_CUSTOMERS);
+  }, [search, selectedWeekDate]);
 
   const toggleMealRowSelection = (row: OrderedMealRow, checked: boolean) => {
     const rowKey = getOrderedMealRowKey(row);
@@ -1747,6 +1838,29 @@ const Orders = () => {
     { key: "requires-action", label: "Requires Action", value: subscriptionsDashboard.requiresActionCount, icon: AlertTriangle, tone: "text-red-700 bg-red-100" },
   ];
 
+  const renderLoadMoreOrders = (emptyLabel = "Load more for this date") => (
+    <div className="flex flex-col items-center gap-2 py-4">
+      {hasNextPage ? (
+        <Button
+          type="button"
+          variant="outline"
+          className="rounded-xl h-10 bg-card"
+          disabled={loadingMoreOrders}
+          onClick={() => void fetchNextPage()}
+        >
+          {loadingMoreOrders ? "Loading more..." : emptyLabel}
+        </Button>
+      ) : orders.length > 0 ? (
+        <p className="text-xs text-muted-foreground">All loaded meals for this date are shown.</p>
+      ) : null}
+      {orders.length > 0 && (
+        <p className="text-[11px] text-muted-foreground tabular-nums">
+          Loaded {orders.length} orders for {format(selectedMealDate, "MMM dd, yyyy")}. Select another date to fetch another day.
+        </p>
+      )}
+    </div>
+  );
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
@@ -1828,24 +1942,18 @@ const Orders = () => {
                 <PopoverTrigger asChild>
                   <Button variant="outline" className="rounded-xl h-10 bg-card">
                     <Calendar className="w-4 h-4 mr-2" />
-                    {selectedMealDate ? format(selectedMealDate, "MMM dd, yyyy") : "All meal dates"}
+                    Meal date: {format(selectedMealDate, "MMM dd, yyyy")}
                   </Button>
                 </PopoverTrigger>
                 <PopoverContent className="w-auto p-0 rounded-xl" align="start">
                   <CalendarComponent
                     mode="single"
                     selected={selectedMealDate}
-                    onSelect={setSelectedMealDate}
+                    onSelect={(date) => date && setSelectedMealDate(date)}
                     initialFocus
                   />
                 </PopoverContent>
               </Popover>
-
-              {selectedMealDate && (
-                <Button variant="ghost" className="rounded-xl h-10 text-destructive hover:text-destructive hover:bg-destructive/10" onClick={() => setSelectedMealDate(undefined)}>
-                  Clear Date
-                </Button>
-              )}
 
               <Button variant="secondary" className="rounded-xl h-10" onClick={() => setSelectedMealDate(new Date())}>
                 Today's Deliveries
@@ -1972,7 +2080,7 @@ const Orders = () => {
                           </TableCell>
                         </TableRow>
                       ) : (
-                        filteredOrderedMeals.map((row) => (
+                        displayedFilteredOrderedMeals.map((row) => (
                           <TableRow key={getOrderedMealRowKey(row)} className="border-border/50">
                           <TableCell>
                             <Checkbox
@@ -2110,6 +2218,19 @@ const Orders = () => {
                 </Table>
                 </div>
               </motion.div>
+              {filteredOrderedMeals.length > displayedFilteredOrderedMeals.length && (
+                <div className="flex justify-center">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="rounded-xl h-10"
+                    onClick={() => setVisibleOrderedMealCount((count) => count + INITIAL_VISIBLE_ORDER_MEALS)}
+                  >
+                    Show more loaded meals
+                  </Button>
+                </div>
+              )}
+              {renderLoadMoreOrders("Load more meals for this date")}
             </div>
           </TabsContent>
 
@@ -2186,7 +2307,7 @@ const Orders = () => {
                       <p className="text-sm text-muted-foreground mt-3">No meals scheduled for this week.</p>
                     </div>
                   ) : (
-                    weeklyMealSchedule.customers.map((customer) => (
+                    displayedWeeklyCustomers.map((customer) => (
                       <div key={customer.key} className="grid grid-cols-[280px_repeat(5,minmax(170px,1fr))] border-b border-border/50 last:border-b-0">
                         <div className="px-4 py-4">
                           <p className="font-semibold text-foreground">{customer.fullName || "Unknown"}</p>
@@ -2339,6 +2460,19 @@ const Orders = () => {
                 </Table>
               </div>
             </motion.div>
+            {weeklyMealSchedule.customers.length > displayedWeeklyCustomers.length && (
+              <div className="flex justify-center">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="rounded-xl h-10"
+                  onClick={() => setVisibleWeeklyCustomerCount((count) => count + INITIAL_VISIBLE_WEEKLY_CUSTOMERS)}
+                >
+                  Show more loaded customers
+                </Button>
+              </div>
+            )}
+            {renderLoadMoreOrders("Load more meals for this date")}
           </TabsContent>
 
           <TabsContent value="delivery-log" className="space-y-6 mt-6">
@@ -2377,7 +2511,7 @@ const Orders = () => {
                     <p className="text-sm text-muted-foreground">No delivered meals yet.</p>
                   </div>
                 ) : (
-                  orderedMealsSummary.delivered.map((row) => (
+                  displayedDeliveredMeals.map((row) => (
                     <div key={`log-${getOrderedMealRowKey(row)}`} className="rounded-xl border border-border/50 bg-muted/20 p-3 flex gap-3 items-start">
                       <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center flex-shrink-0">
                         <CheckCircle2 className="w-4 h-4 text-emerald-600" />
@@ -2394,6 +2528,19 @@ const Orders = () => {
                 )}
               </div>
             </motion.div>
+            {orderedMealsSummary.delivered.length > displayedDeliveredMeals.length && (
+              <div className="flex justify-center">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="rounded-xl h-10"
+                  onClick={() => setVisibleDeliveryCount((count) => count + INITIAL_VISIBLE_DELIVERIES)}
+                >
+                  Show more loaded deliveries
+                </Button>
+              </div>
+            )}
+            {renderLoadMoreOrders("Load more deliveries for this date")}
           </TabsContent>
 
           <TabsContent value="orders" className="space-y-6 mt-6">
@@ -2402,24 +2549,22 @@ const Orders = () => {
                 <PopoverTrigger asChild>
                   <Button variant="outline" className="rounded-xl h-10 bg-card">
                     <Calendar className="w-4 h-4 mr-2" />
-                    {deliveryDateFilter ? `Delivery: ${format(deliveryDateFilter, "MMM dd, yyyy")}` : "All delivery dates"}
+                    Meal date: {format(selectedMealDate, "MMM dd, yyyy")}
                   </Button>
                 </PopoverTrigger>
                 <PopoverContent className="w-auto p-0 rounded-xl" align="start">
                   <CalendarComponent
                     mode="single"
-                    selected={deliveryDateFilter}
-                    onSelect={(date) => date && setDeliveryDateFilter(date)}
+                    selected={selectedMealDate}
+                    onSelect={(date) => date && setSelectedMealDate(date)}
                     initialFocus
                   />
                 </PopoverContent>
               </Popover>
 
-              {deliveryDateFilter && (
-                <Button variant="ghost" className="rounded-xl h-10 text-destructive hover:text-destructive hover:bg-destructive/10" onClick={() => setDeliveryDateFilter(undefined)}>
-                  Clear Filter
-                </Button>
-              )}
+              <Button variant="secondary" className="rounded-xl h-10" onClick={() => setSelectedMealDate(new Date())}>
+                Today's Orders
+              </Button>
 
               <Popover>
                 <PopoverTrigger asChild>
@@ -2480,7 +2625,7 @@ const Orders = () => {
                       </TableCell>
                     </TableRow>
                   ) : (
-                    filteredOrders.map((order) => (
+                    displayedFilteredOrders.map((order) => (
                       (() => {
                         const customerName = getDeliveryContactName(
                           order.delivery_address,
@@ -2564,6 +2709,19 @@ const Orders = () => {
               </Table>
               </div>
             </motion.div>
+            {filteredOrders.length > displayedFilteredOrders.length && (
+              <div className="flex justify-center">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="rounded-xl h-10"
+                  onClick={() => setVisibleOrderCount((count) => count + INITIAL_VISIBLE_ORDERS)}
+                >
+                  Show more loaded orders
+                </Button>
+              </div>
+            )}
+            {renderLoadMoreOrders()}
           </TabsContent>
         </Tabs>
 
