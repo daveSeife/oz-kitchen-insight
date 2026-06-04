@@ -14,6 +14,7 @@ import {
   RotateCcw,
   Search,
   ShoppingBag,
+  Truck,
   UserCheck,
   Wallet,
   XCircle,
@@ -87,6 +88,7 @@ import {
 
 type OrderStatus = "pending" | "confirmed" | "preparing" | "delivered" | "cancelled";
 type OrderMealRowRecord = Tables<"order_meals">;
+type DeliveryRider = Tables<"delivery_riders">;
 
 interface Order {
   id: string;
@@ -166,7 +168,9 @@ interface SubscriptionDashboardRow {
 
 export const ORDERS_QUERY_KEY = ["orders"] as const;
 const SUBSCRIPTIONS_QUERY_KEY = ["subscriptions-dashboard"] as const;
+const DELIVERY_RIDERS_QUERY_KEY = ["delivery-riders"] as const;
 const ORDER_MEALS_PAGE_SIZE = 250;
+const WEEKLY_ORDER_MEALS_PAGE_SIZE = 1000;
 const INITIAL_VISIBLE_ORDER_MEALS = 250;
 const INITIAL_VISIBLE_ORDERS = 100;
 const INITIAL_VISIBLE_DELIVERIES = 200;
@@ -490,6 +494,8 @@ const Orders = () => {
   const [selectedWeekDate, setSelectedWeekDate] = useState<Date>(new Date());
   const [selectedTimeSlot, setSelectedTimeSlot] = useState("all");
   const [selectedMealType, setSelectedMealType] = useState("all");
+  const [selectedDeliveryRider, setSelectedDeliveryRider] = useState("all");
+  const [showUnassignedOnly, setShowUnassignedOnly] = useState(false);
   const [operationalFilter, setOperationalFilter] = useState<OperationalFilter>("all");
   const [subscriptionFilter, setSubscriptionFilter] = useState<SubscriptionFilter>("all");
   const [updatingMealId, setUpdatingMealId] = useState<string | null>(null);
@@ -507,6 +513,7 @@ const Orders = () => {
   const [visibleDeliveryCount, setVisibleDeliveryCount] = useState(INITIAL_VISIBLE_DELIVERIES);
   const [visibleWeeklyCustomerCount, setVisibleWeeklyCustomerCount] = useState(INITIAL_VISIBLE_WEEKLY_CUSTOMERS);
   const selectedMealDateKey = useMemo(() => toDateKey(selectedMealDate), [selectedMealDate]);
+  const selectedWeekStartKey = useMemo(() => toDateKey(getMondayForWeek(selectedWeekDate)), [selectedWeekDate]);
 
   const formatPaymentStatus = (value?: string | null) => {
     if (!value) return "pending";
@@ -746,6 +753,90 @@ const Orders = () => {
     };
   };
 
+  const fetchWeeklyOrders = async (): Promise<Order[]> => {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) return [];
+
+    const adminAccess = await getAdminAccess(user.id);
+    const currentUserIsAdmin = adminAccess.hasAccess;
+    const weekStart = getMondayForWeek(selectedWeekDate);
+    const weekEnd = addDays(weekStart, 4);
+    const weekStartKey = toDateKey(weekStart);
+    const weekEndKey = toDateKey(weekEnd);
+    const orderMealsData: OrderMealRowRecord[] = [];
+    let pageOffset = 0;
+
+    while (true) {
+      const { data, error } = await supabase
+        .from("order_meals")
+        .select("*")
+        .gte("scheduled_date", weekStartKey)
+        .lte("scheduled_date", weekEndKey)
+        .order("scheduled_date", { ascending: true })
+        .order("scheduled_time_slot", { ascending: true })
+        .order("created_at", { ascending: true })
+        .range(pageOffset, pageOffset + WEEKLY_ORDER_MEALS_PAGE_SIZE - 1);
+
+      if (error) {
+        if (isMissingOrderMealsTableError(error)) return [];
+        throw error;
+      }
+
+      const rows = (data || []) as OrderMealRowRecord[];
+      orderMealsData.push(...rows);
+
+      if (rows.length < WEEKLY_ORDER_MEALS_PAGE_SIZE) break;
+      pageOffset += WEEKLY_ORDER_MEALS_PAGE_SIZE;
+    }
+
+    const orderIds = Array.from(new Set(orderMealsData.map((meal) => meal.order_id)));
+    if (orderIds.length === 0) return [];
+
+    let ordersQuery = supabase.from("orders").select("*").in("id", orderIds);
+    if (!currentUserIsAdmin) {
+      ordersQuery = ordersQuery.eq("user_id", user.id);
+    }
+
+    const { data: fetchedOrders, error: ordersError } = await ordersQuery;
+    if (ordersError) throw ordersError;
+
+    const orderSort = new Map(orderIds.map((orderId, index) => [orderId, index]));
+    const ordersData = ((fetchedOrders || []) as Tables<"orders">[]).sort(
+      (left, right) => (orderSort.get(left.id) ?? 0) - (orderSort.get(right.id) ?? 0),
+    );
+    const visibleOrderIds = new Set(ordersData.map((order) => order.id));
+    const visibleOrderMealsData = orderMealsData.filter((meal) => visibleOrderIds.has(meal.order_id));
+    const normalizedOrderIds = ordersData.map((order) => order.id);
+    const userIds = Array.from(new Set(ordersData.map((order) => order.user_id).filter(Boolean)));
+
+    const [{ data: profilesData, error: profilesError }, { data: paymentsData, error: paymentsError }] =
+      await Promise.all([
+        userIds.length > 0
+          ? supabase.from("profiles").select("id, first_name, last_name, phone_number").in("id", userIds)
+          : Promise.resolve({ data: [], error: null }),
+        normalizedOrderIds.length > 0
+          ? supabase
+              .from("payments")
+              .select("id, order_id, payment_gateway_response, created_at")
+              .in("order_id", normalizedOrderIds)
+              .order("created_at", { ascending: false })
+          : Promise.resolve({ data: [], error: null }),
+      ]);
+
+    if (profilesError) throw profilesError;
+    if (paymentsError) throw paymentsError;
+
+    return normalizeOrders(
+      ordersData,
+      (paymentsData || []) as LatestPaymentRecord[],
+      visibleOrderMealsData,
+      profilesData || [],
+    );
+  };
+
   const fetchSubscriptions = async () => {
     const {
       data: { user },
@@ -808,6 +899,17 @@ const Orders = () => {
     });
   };
 
+  const fetchDeliveryRiders = async () => {
+    const { data, error } = await supabase
+      .from("delivery_riders")
+      .select("*")
+      .eq("is_active", true)
+      .order("name", { ascending: true });
+
+    if (error) throw error;
+    return (data || []) as DeliveryRider[];
+  };
+
   const {
     data: ordersQueryData,
     error: ordersError,
@@ -837,6 +939,37 @@ const Orders = () => {
     queryFn: fetchSubscriptions,
     enabled: activeTab === "subscriptions",
     staleTime: Infinity,
+    gcTime: 30 * 60 * 1000,
+    refetchOnMount: true,
+    refetchOnReconnect: false,
+    refetchOnWindowFocus: false,
+    retry: 1,
+  });
+
+  const {
+    data: weeklyOrders = [],
+    error: weeklyOrdersError,
+    isLoading: weeklyOrdersLoading,
+    isFetching: weeklyOrdersFetching,
+  } = useQuery({
+    queryKey: [...ORDERS_QUERY_KEY, "weekly", selectedWeekStartKey],
+    queryFn: fetchWeeklyOrders,
+    enabled: activeTab === "weekly-meals",
+    staleTime: Infinity,
+    gcTime: 30 * 60 * 1000,
+    refetchOnMount: true,
+    refetchOnReconnect: false,
+    refetchOnWindowFocus: false,
+    retry: 1,
+  });
+
+  const {
+    data: deliveryRiders = [],
+    error: deliveryRidersError,
+  } = useQuery({
+    queryKey: DELIVERY_RIDERS_QUERY_KEY,
+    queryFn: fetchDeliveryRiders,
+    staleTime: 5 * 60 * 1000,
     gcTime: 30 * 60 * 1000,
     refetchOnMount: true,
     refetchOnReconnect: false,
@@ -880,6 +1013,18 @@ const Orders = () => {
     console.error("[Orders] fetchSubscriptions error", subscriptionsError);
     toast.error("Failed to fetch subscriptions");
   }, [subscriptionsError]);
+
+  useEffect(() => {
+    if (!weeklyOrdersError) return;
+    console.error("[Orders] fetchWeeklyOrders error", weeklyOrdersError);
+    toast.error("Failed to fetch weekly meals");
+  }, [weeklyOrdersError]);
+
+  useEffect(() => {
+    if (!deliveryRidersError) return;
+    console.error("[Orders] fetchDeliveryRiders error", deliveryRidersError);
+    toast.error("Failed to fetch delivery riders");
+  }, [deliveryRidersError]);
 
   const updateOrderStatus = async (orderId: string, newStatus: string) => {
     try {
@@ -1093,6 +1238,21 @@ const Orders = () => {
     );
   };
 
+  const handleAssignDeliveryRider = async (row: OrderedMealRow, riderId: string) => {
+    const rider = deliveryRiders.find((item) => item.id === riderId) || null;
+
+    await updateMealRecord(
+      row.meal,
+      row.order,
+      {
+        assigned_rider_id: rider?.id || null,
+        assigned_rider_name: rider?.name || null,
+        assigned_rider_phone: rider?.phone_number || null,
+      },
+      rider ? `${rider.name} assigned to delivery` : "Delivery rider removed",
+    );
+  };
+
   const filteredOrders = useMemo(() => {
     return orders.filter((order) => {
       if (isExcludedPaymentStatus(order.payment_status)) {
@@ -1173,6 +1333,46 @@ const Orders = () => {
     });
   }, [orders]);
 
+  const weeklyOrderedMealRows = useMemo<OrderedMealRow[]>(() => {
+    const rows = weeklyOrders.flatMap((order) => {
+      if (isExcludedPaymentStatus(order.payment_status)) {
+        return [];
+      }
+
+      const fullName = getDeliveryContactName(
+        order.delivery_address,
+        `${order.profiles.first_name || ""} ${order.profiles.last_name || ""}`.trim(),
+      );
+      const phone = getDeliveryContactPhone(order.delivery_address, order.profiles.phone_number || "");
+      const location = formatAddressText(order.delivery_address);
+
+      return order.meals.map((meal) => ({
+        meal,
+        order,
+        fullName,
+        phone,
+        location,
+      }));
+    });
+
+    return rows.sort((left, right) => {
+      const leftKey = [
+        left.meal.scheduled_date || "",
+        left.meal.scheduled_time_slot || "",
+        left.fullName.toLowerCase(),
+        left.meal.meal_name.toLowerCase(),
+      ].join("::");
+      const rightKey = [
+        right.meal.scheduled_date || "",
+        right.meal.scheduled_time_slot || "",
+        right.fullName.toLowerCase(),
+        right.meal.meal_name.toLowerCase(),
+      ].join("::");
+
+      return leftKey.localeCompare(rightKey);
+    });
+  }, [weeklyOrders]);
+
   const timeSlotOptions = useMemo(() => {
     return Array.from(
       new Set(orderedMealRows.map((row) => row.meal.scheduled_time_slot).filter(Boolean)),
@@ -1230,6 +1430,24 @@ const Orders = () => {
     () => filteredOrderedMeals.slice(0, visibleOrderedMealCount),
     [filteredOrderedMeals, visibleOrderedMealCount],
   );
+
+  const deliveryManagementRows = useMemo(() => {
+    return baseFilteredOrderedMeals.filter((row) => {
+      const isUnassigned = !row.meal.assigned_rider_id && !row.meal.assigned_rider_name;
+      const matchesUnassigned = !showUnassignedOnly || isUnassigned;
+      const matchesRider =
+        selectedDeliveryRider === "all" || row.meal.assigned_rider_id === selectedDeliveryRider;
+
+      return matchesUnassigned && matchesRider;
+    });
+  }, [baseFilteredOrderedMeals, selectedDeliveryRider, showUnassignedOnly]);
+
+  const selectedRiderAssignedCount = useMemo(() => {
+    if (selectedDeliveryRider === "all") return 0;
+    return getMealQuantityTotal(
+      baseFilteredOrderedMeals.filter((row) => row.meal.assigned_rider_id === selectedDeliveryRider),
+    );
+  }, [baseFilteredOrderedMeals, selectedDeliveryRider]);
 
   const orderedMealsSummary = useMemo(() => {
     const delivered = baseFilteredOrderedMeals.filter((row) => row.meal.status === "delivered");
@@ -1423,7 +1641,7 @@ const Orders = () => {
       }
     >();
 
-    for (const row of orderedMealRows) {
+    for (const row of weeklyOrderedMealRows) {
       if (!row.meal.scheduled_date || !weekdayDateKeys.has(row.meal.scheduled_date)) {
         continue;
       }
@@ -1476,7 +1694,7 @@ const Orders = () => {
       weekDates,
       customers,
     };
-  }, [orderedMealRows, search, selectedWeekDate]);
+  }, [search, selectedWeekDate, weeklyOrderedMealRows]);
 
   const displayedWeeklyCustomers = useMemo(
     () => weeklyMealSchedule.customers.slice(0, visibleWeeklyCustomerCount),
@@ -1735,7 +1953,8 @@ const Orders = () => {
         delivery_date: row.meal.scheduled_date || row.order.delivery_date || "",
         meal: row.meal.meal_name,
         quantity: row.meal.quantity,
-        delivery_guy: "",
+        delivery_guy: row.meal.assigned_rider_name || "",
+        delivery_phone: row.meal.assigned_rider_phone || "",
         notes: getMealNoteText(row.meal),
       };
     });
@@ -1743,8 +1962,9 @@ const Orders = () => {
     exportToExcel(
       exportData,
       "ordered_meals",
-      ["order_number", "full_name", "phone", "zone", "street", "building_details", "delivery_date", "meal", "quantity", "delivery_guy", "notes"],
-      ["Order #", "Full Name", "Phone", "Zone", "Street", "Building / Instructions", "Delivery Date", "Meal", "Quantity", "Delivery Guy", "Notes"],
+      ["order_number", "full_name", "phone", "zone", "street", "building_details", "delivery_date", "meal", "quantity", "delivery_guy", "delivery_phone", "notes"],
+      ["Order #", "Full Name", "Phone", "Zone", "Street", "Building / Instructions", "Delivery Date", "Meal", "Quantity", "Delivery Guy", "Delivery Phone", "Notes"],
+      ["phone", "delivery_phone"],
     );
     toast.success(
       excludedCount > 0
@@ -1877,6 +2097,9 @@ const Orders = () => {
               <TabsTrigger value="ordered-meals" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm">
                 Ordered Meals
               </TabsTrigger>
+              <TabsTrigger value="delivery-management" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm">
+                Delivery Management
+              </TabsTrigger>
               <TabsTrigger value="delivery-log" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm">
                 Delivery Log
               </TabsTrigger>
@@ -1898,6 +2121,8 @@ const Orders = () => {
                   placeholder={
                     activeTab === "ordered-meals"
                       ? "Search customer, phone, meal, location..."
+                      : activeTab === "delivery-management"
+                        ? "Search delivery assignments..."
                       : activeTab === "weekly-meals"
                         ? "Search weekly meals..."
                         : activeTab === "subscriptions"
@@ -1910,7 +2135,7 @@ const Orders = () => {
                 />
               </div>
 
-              {activeTab === "ordered-meals" ? (
+              {activeTab === "ordered-meals" || activeTab === "delivery-management" ? (
                 <Button onClick={handleExportOrderedMeals} variant="outline" className="rounded-xl h-10">
                   <Download className="w-4 h-4 mr-2" />
                   Export Excel
@@ -2035,7 +2260,7 @@ const Orders = () => {
             <div className="grid gap-6">
               <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.3 }} className="rounded-xl border border-border/50 bg-card shadow-card overflow-hidden">
                 <div className="overflow-x-auto">
-                  <Table className="modern-table min-w-[900px]">
+                  <Table className="modern-table min-w-[1080px]">
                     <TableHeader>
                       <TableRow className="hover:bg-transparent border-border/50">
                         <TableHead className="w-[56px]">
@@ -2055,6 +2280,7 @@ const Orders = () => {
                         <TableHead className="min-w-[180px]">Customer</TableHead>
                         <TableHead className="w-[120px]">Contact</TableHead>
                         <TableHead className="min-w-[220px]">Meal Details</TableHead>
+                        <TableHead className="min-w-[170px]">Assigned Rider</TableHead>
                         <TableHead className="w-[60px]">Qty</TableHead>
                         <TableHead className="min-w-[220px]">Notes</TableHead>
                         <TableHead className="w-[140px]">Status</TableHead>
@@ -2063,7 +2289,7 @@ const Orders = () => {
                     <TableBody>
                       {loading ? (
                         <TableRow>
-                          <TableCell colSpan={8} className="text-center py-12">
+                          <TableCell colSpan={9} className="text-center py-12">
                             <div className="flex flex-col items-center gap-3">
                               <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
                               <p className="text-sm text-muted-foreground">Loading meals...</p>
@@ -2072,7 +2298,7 @@ const Orders = () => {
                         </TableRow>
                       ) : filteredOrderedMeals.length === 0 ? (
                         <TableRow>
-                          <TableCell colSpan={8} className="text-center py-12">
+                          <TableCell colSpan={9} className="text-center py-12">
                             <div className="flex flex-col items-center gap-3">
                               <ShoppingBag className="w-10 h-10 text-muted-foreground/30" />
                               <p className="text-sm text-muted-foreground">No meals found</p>
@@ -2118,6 +2344,20 @@ const Orders = () => {
                                 </p>
                               )}
                             </div>
+                          </TableCell>
+                          <TableCell>
+                            {row.meal.assigned_rider_name ? (
+                              <div>
+                                <p className="font-semibold text-foreground">{row.meal.assigned_rider_name}</p>
+                                <p className="text-xs text-muted-foreground tabular-nums">
+                                  {row.meal.assigned_rider_phone || "-"}
+                                </p>
+                              </div>
+                            ) : (
+                              <Badge variant="outline" className="border-dashed text-muted-foreground">
+                                Unassigned
+                              </Badge>
+                            )}
                           </TableCell>
                           <TableCell className="font-semibold tabular-nums">{row.meal.quantity}</TableCell>
                           <TableCell>
@@ -2234,6 +2474,169 @@ const Orders = () => {
             </div>
           </TabsContent>
 
+          <TabsContent value="delivery-management" className="space-y-6 mt-6">
+            <div className="flex items-center gap-3 flex-wrap">
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" className="rounded-xl h-10 bg-card">
+                    <Calendar className="w-4 h-4 mr-2" />
+                    Meal date: {format(selectedMealDate, "MMM dd, yyyy")}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0 rounded-xl" align="start">
+                  <CalendarComponent
+                    mode="single"
+                    selected={selectedMealDate}
+                    onSelect={(date) => date && setSelectedMealDate(date)}
+                    initialFocus
+                  />
+                </PopoverContent>
+              </Popover>
+
+              <Button variant="secondary" className="rounded-xl h-10" onClick={() => setSelectedMealDate(new Date())}>
+                Today's Deliveries
+              </Button>
+
+              <label className="inline-flex h-10 items-center gap-2 rounded-xl border border-border/50 bg-card px-3 text-sm font-medium">
+                <Checkbox
+                  checked={showUnassignedOnly}
+                  onCheckedChange={(checked) => setShowUnassignedOnly(Boolean(checked))}
+                  className="w-4 h-4 rounded-md"
+                />
+                Unassigned Only
+              </label>
+
+              <Select value={selectedDeliveryRider} onValueChange={setSelectedDeliveryRider}>
+                <SelectTrigger className="w-[220px] rounded-xl h-10 bg-card">
+                  <SelectValue placeholder="Filter by rider" />
+                </SelectTrigger>
+                <SelectContent className="rounded-xl">
+                  <SelectItem value="all">All Riders</SelectItem>
+                  {deliveryRiders.map((rider) => (
+                    <SelectItem key={rider.id} value={rider.id}>
+                      {rider.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              {selectedDeliveryRider !== "all" && (
+                <Badge variant="outline" className="h-10 rounded-xl px-3 text-sm bg-card">
+                  {selectedRiderAssignedCount} assigned
+                </Badge>
+              )}
+            </div>
+
+            <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="rounded-xl border border-border/50 bg-card shadow-card overflow-hidden">
+              <div className="overflow-x-auto">
+                <Table className="modern-table min-w-[1040px]">
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent border-border/50">
+                      <TableHead className="min-w-[190px]">Customer Name</TableHead>
+                      <TableHead className="w-[140px]">Phone Number</TableHead>
+                      <TableHead className="min-w-[260px]">Address</TableHead>
+                      <TableHead className="min-w-[190px]">Assigned Rider</TableHead>
+                      <TableHead className="w-[190px]">Action</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {loading ? (
+                      <TableRow>
+                        <TableCell colSpan={5} className="text-center py-12">
+                          <div className="flex flex-col items-center gap-3">
+                            <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+                            <p className="text-sm text-muted-foreground">Loading delivery assignments...</p>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ) : deliveryManagementRows.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={5} className="text-center py-12">
+                          <div className="flex flex-col items-center gap-3">
+                            <Truck className="w-10 h-10 text-muted-foreground/30" />
+                            <p className="text-sm text-muted-foreground">No delivery assignments found</p>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      deliveryManagementRows.map((row) => (
+                        <TableRow key={`delivery-${getOrderedMealRowKey(row)}`} className="border-border/50">
+                          <TableCell>
+                            <p className="font-semibold text-foreground">{row.fullName || "Unknown"}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {row.meal.meal_name} x{row.meal.quantity}
+                            </p>
+                          </TableCell>
+                          <TableCell className="text-muted-foreground tabular-nums">{row.phone || "-"}</TableCell>
+                          <TableCell>
+                            <p className="text-sm text-muted-foreground line-clamp-2" title={row.location || ""}>
+                              {row.location || "-"}
+                            </p>
+                            <p className="mt-1 text-[11px] text-muted-foreground">
+                              {row.meal.scheduled_date || "No date"}
+                              {row.meal.scheduled_time_slot ? ` - ${row.meal.scheduled_time_slot}` : ""}
+                            </p>
+                          </TableCell>
+                          <TableCell>
+                            {row.meal.assigned_rider_name ? (
+                              <div>
+                                <p className="font-semibold text-foreground">{row.meal.assigned_rider_name}</p>
+                                <p className="text-xs text-muted-foreground tabular-nums">
+                                  {row.meal.assigned_rider_phone || "-"}
+                                </p>
+                              </div>
+                            ) : (
+                              <Badge variant="outline" className="border-dashed text-muted-foreground">
+                                Unassigned
+                              </Badge>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant={row.meal.assigned_rider_id ? "outline" : "default"}
+                                  className="w-full rounded-lg"
+                                  disabled={updatingMealId === row.meal.id || deliveryRiders.length === 0}
+                                >
+                                  <Truck className="w-4 h-4 mr-2" />
+                                  {row.meal.assigned_rider_id ? "Change" : "Assign"}
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" className="w-56">
+                                {deliveryRiders.map((rider) => (
+                                  <DropdownMenuItem
+                                    key={rider.id}
+                                    onClick={() => void handleAssignDeliveryRider(row, rider.id)}
+                                  >
+                                    {rider.name}
+                                  </DropdownMenuItem>
+                                ))}
+                                {row.meal.assigned_rider_id && (
+                                  <DropdownMenuItem onClick={() => void handleAssignDeliveryRider(row, "unassigned")}>
+                                    Remove assignment
+                                  </DropdownMenuItem>
+                                )}
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                            {deliveryRiders.length === 0 && (
+                              <p className="mt-1 text-[10px] text-muted-foreground text-center">
+                                Add riders in Rider Management
+                              </p>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </motion.div>
+            {renderLoadMoreOrders("Load more assignments for this date")}
+          </TabsContent>
+
           <TabsContent value="weekly-meals" className="space-y-6 mt-6">
             <div className="flex items-center gap-3 flex-wrap">
               <Button
@@ -2296,7 +2699,7 @@ const Orders = () => {
                     ))}
                   </div>
 
-                  {loading ? (
+                  {weeklyOrdersLoading || weeklyOrdersFetching ? (
                     <div className="flex flex-col items-center justify-center py-12 text-center">
                       <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
                       <p className="text-sm text-muted-foreground mt-3">Loading weekly meals...</p>
@@ -2472,7 +2875,11 @@ const Orders = () => {
                 </Button>
               </div>
             )}
-            {renderLoadMoreOrders("Load more meals for this date")}
+            {weeklyOrders.length > 0 && (
+              <p className="text-center text-[11px] text-muted-foreground tabular-nums">
+                Loaded {weeklyOrders.length} orders for this selected week.
+              </p>
+            )}
           </TabsContent>
 
           <TabsContent value="delivery-log" className="space-y-6 mt-6">

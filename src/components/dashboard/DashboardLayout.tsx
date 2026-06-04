@@ -15,6 +15,7 @@ import {
   X,
   ChefHat,
   CreditCard,
+  Truck,
   UserCheck,
   Bell,
 } from "lucide-react";
@@ -27,6 +28,7 @@ const superAdminNavigation = [
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { name: "Meals", href: "/meals", icon: UtensilsCrossed },
   { name: "Orders", href: "/orders", icon: ShoppingBag },
+  { name: "Rider Management", href: "/riders", icon: Truck },
   { name: "Payments", href: "/payments", icon: CreditCard },
   { name: "Users", href: "/users", icon: Users },
   { name: "Referrals", href: "/referrals", icon: UserCheck },

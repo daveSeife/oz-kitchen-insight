@@ -45,12 +45,15 @@ export const exportToExcel = (
   filename: string,
   headers: string[],
   headerLabels?: string[],
+  textHeaders: string[] = [],
 ) => {
   if (data.length === 0) {
     return;
   }
 
   const labels = headerLabels && headerLabels.length === headers.length ? headerLabels : headers;
+  const shouldExportAsText = (header: string) =>
+    textHeaders.includes(header) || header.toLowerCase().includes("phone");
   const escapeHtml = (value: unknown) =>
     String(value ?? "")
       .replace(/&/g, "&amp;")
@@ -62,7 +65,13 @@ export const exportToExcel = (
   const bodyRows = data
     .map((row) => {
       const cells = headers
-        .map((header) => `<td>${escapeHtml(row[header])}</td>`)
+        .map((header) => {
+          const textCellAttributes = shouldExportAsText(header)
+            ? ` style="mso-number-format:'\\@';" x:str`
+            : "";
+
+          return `<td${textCellAttributes}>${escapeHtml(row[header])}</td>`;
+        })
         .join("");
       return `<tr>${cells}</tr>`;
     })
