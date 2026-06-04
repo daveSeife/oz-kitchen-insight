@@ -423,8 +423,41 @@ export type Database = {
           },
         ]
       }
+      delivery_riders: {
+        Row: {
+          created_at: string | null
+          id: string
+          is_active: boolean | null
+          name: string
+          notes: string | null
+          phone_number: string
+          updated_at: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          id?: string
+          is_active?: boolean | null
+          name: string
+          notes?: string | null
+          phone_number: string
+          updated_at?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          id?: string
+          is_active?: boolean | null
+          name?: string
+          notes?: string | null
+          phone_number?: string
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
       order_meals: {
         Row: {
+          assigned_rider_id: string | null
+          assigned_rider_name: string | null
+          assigned_rider_phone: string | null
           created_at: string | null
           customer_note: string | null
           dietary_tags: string[] | null
@@ -449,6 +482,9 @@ export type Database = {
           updated_at: string | null
         }
         Insert: {
+          assigned_rider_id?: string | null
+          assigned_rider_name?: string | null
+          assigned_rider_phone?: string | null
           created_at?: string | null
           customer_note?: string | null
           dietary_tags?: string[] | null
@@ -473,6 +509,9 @@ export type Database = {
           updated_at?: string | null
         }
         Update: {
+          assigned_rider_id?: string | null
+          assigned_rider_name?: string | null
+          assigned_rider_phone?: string | null
           created_at?: string | null
           customer_note?: string | null
           dietary_tags?: string[] | null
@@ -497,6 +536,13 @@ export type Database = {
           updated_at?: string | null
         }
         Relationships: [
+          {
+            foreignKeyName: "order_meals_assigned_rider_id_fkey"
+            columns: ["assigned_rider_id"]
+            isOneToOne: false
+            referencedRelation: "delivery_riders"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "order_meals_meal_id_fkey"
             columns: ["meal_id"]

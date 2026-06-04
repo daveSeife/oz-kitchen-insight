@@ -11,6 +11,7 @@ import Dashboard from "./pages/Dashboard";
 import Meals from "./pages/Meals";
 import Orders, { ORDERS_QUERY_KEY } from "./pages/Orders";
 import Users from "./pages/Users";
+import Riders from "./pages/Riders";
 import Referrals from "./pages/Referrals";
 import Partners from "./pages/Partners";
 import Payments from "./pages/Payments";
@@ -66,6 +67,7 @@ const App = () => (
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/meals" element={<Meals />} />
           <Route path="/orders" element={<Orders />} />
+          <Route path="/riders" element={<Riders />} />
           <Route path="/users" element={<Users />} />
           <Route path="/referrals" element={<Referrals />} />
           <Route path="/partners" element={<Partners />} />

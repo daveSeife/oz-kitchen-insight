@@ -17,6 +17,9 @@ export type NormalizedMealRecoveryAction =
 export interface NormalizedOrderMeal {
   id: string;
   order_id: string;
+  assigned_rider_id: string | null;
+  assigned_rider_name: string | null;
+  assigned_rider_phone: string | null;
   meal_id: string | null;
   meal_name: string;
   meal_category: string | null;
@@ -270,6 +273,9 @@ export const normalizeOrderMealRow = (row: Record<string, unknown>): NormalizedO
   return {
     id: asString(row.id),
     order_id: asString(row.order_id),
+    assigned_rider_id: asString(row.assigned_rider_id) || null,
+    assigned_rider_name: asString(row.assigned_rider_name) || null,
+    assigned_rider_phone: asString(row.assigned_rider_phone) || null,
     meal_id: pickMealId(row),
     meal_name: pickMealName(row),
     meal_category: pickMealCategory(row),
@@ -320,6 +326,9 @@ export const parseLegacyMealSnapshot = (
     return {
       id: `legacy-${orderId}-${index}`,
       order_id: orderId,
+      assigned_rider_id: asString(record.assigned_rider_id) || null,
+      assigned_rider_name: asString(record.assigned_rider_name) || null,
+      assigned_rider_phone: asString(record.assigned_rider_phone) || null,
       meal_id: pickMealId(record),
       meal_name: pickMealName(record),
       meal_category: pickMealCategory(record),
