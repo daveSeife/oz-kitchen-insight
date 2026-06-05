@@ -683,7 +683,9 @@ const Orders = () => {
 
     const orderMealsQuery = supabase
       .from("order_meals")
-      .select("*")
+      .select(
+        "id, order_id, meal_id, meal_name, scheduled_date, scheduled_time_slot, status, quantity, unit_price, metadata, customer_note, created_at"
+      )
       .eq("scheduled_date", selectedMealDateKey)
       .order("scheduled_time_slot", { ascending: true })
       .order("created_at", { ascending: true })
@@ -699,7 +701,12 @@ const Orders = () => {
     const orderIds = Array.from(new Set(orderMealsData.map((meal) => meal.order_id)));
 
     let ordersQuery = orderIds.length > 0
-      ? supabase.from("orders").select("*").in("id", orderIds)
+      ? supabase
+          .from("orders")
+          .select(
+            "id, user_id, order_number, total_amount, status, payment_status, created_at, delivery_address, delivery_date, delivery_time_slot, notes, subtotal, delivery_fee, discount_amount, payment_method, meal_plan_id"
+          )
+          .in("id", orderIds)
       : null;
 
     if (ordersQuery && !currentUserIsAdmin) {
@@ -772,7 +779,9 @@ const Orders = () => {
     while (true) {
       const { data, error } = await supabase
         .from("order_meals")
-        .select("*")
+        .select(
+          "id, order_id, meal_id, meal_name, scheduled_date, scheduled_time_slot, status, quantity, unit_price, metadata, customer_note, created_at"
+        )
         .gte("scheduled_date", weekStartKey)
         .lte("scheduled_date", weekEndKey)
         .order("scheduled_date", { ascending: true })

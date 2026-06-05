@@ -40,7 +40,11 @@ const Payments = () => {
     try {
       const [{ data: paymentRows, error: paymentsError }, { data: orderRows, error: ordersError }] =
         await Promise.all([
-          supabase.from("payments").select("*").order("created_at", { ascending: false }),
+          supabase
+            .from("payments")
+            .select("id, order_id, amount, status, payment_method, created_at, processed_at, currency")
+            .order("created_at", { ascending: false })
+            .range(0, 499),
           supabase.from("orders").select(`id, order_number, user_id, total_amount, payment_status, payment_method, delivery_address, created_at`).order("created_at", { ascending: false }),
         ]);
       if (paymentsError) throw paymentsError;

@@ -1,23 +1,25 @@
-import React, { useEffect } from "react";
+import React, { useEffect, Suspense, lazy } from "react";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import Index from "./pages/Index";
-import Login from "./pages/Login";
-import Signup from "./pages/Signup";
-import Dashboard from "./pages/Dashboard";
-import Meals from "./pages/Meals";
-import Orders, { ORDERS_QUERY_KEY } from "./pages/Orders";
-import Users from "./pages/Users";
-import Riders from "./pages/Riders";
-import Referrals from "./pages/Referrals";
-import Partners from "./pages/Partners";
-import Payments from "./pages/Payments";
-import PartnerDashboard from "./pages/PartnerDashboard";
-import NotFound from "./pages/NotFound";
+const Index = lazy(() => import("./pages/Index"));
+const Login = lazy(() => import("./pages/Login"));
+const Signup = lazy(() => import("./pages/Signup"));
+const Dashboard = lazy(() => import("./pages/Dashboard"));
+const Meals = lazy(() => import("./pages/Meals"));
+const Orders = lazy(() => import("./pages/Orders"));
+const Users = lazy(() => import("./pages/Users"));
+const Riders = lazy(() => import("./pages/Riders"));
+const Referrals = lazy(() => import("./pages/Referrals"));
+const Partners = lazy(() => import("./pages/Partners"));
+const Payments = lazy(() => import("./pages/Payments"));
+const PartnerDashboard = lazy(() => import("./pages/PartnerDashboard"));
+const NotFound = lazy(() => import("./pages/NotFound"));
 import { supabase } from "@/integrations/supabase/client";
+
+const ORDERS_QUERY_KEY = ["orders"] as const;
 
 const queryClient = new QueryClient();
 
@@ -60,7 +62,8 @@ const App = () => (
       <Toaster />
       <Sonner />
       <BrowserRouter>
-        <Routes>
+        <Suspense fallback={<div>Loading...</div>}>
+          <Routes>
           <Route path="/" element={<Navigate to="/login" replace />} />
           <Route path="/login" element={<Login />} />
           <Route path="/signup" element={<Signup />} />
@@ -75,7 +78,8 @@ const App = () => (
           <Route path="/partner-dashboard" element={<PartnerDashboard />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
-        </Routes>
+          </Routes>
+        </Suspense>
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>
