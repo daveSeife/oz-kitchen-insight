@@ -684,7 +684,7 @@ const Orders = () => {
     const orderMealsQuery = supabase
       .from("order_meals")
       .select(
-        "id, order_id, meal_id, meal_name, scheduled_date, scheduled_time_slot, status, quantity, unit_price, metadata, customer_note, created_at"
+        "id, order_id, assigned_rider_id, assigned_rider_name, assigned_rider_phone, meal_id, meal_name, scheduled_date, scheduled_time_slot, status, quantity, unit_price, metadata, customer_note, created_at"
       )
       .eq("scheduled_date", selectedMealDateKey)
       .order("scheduled_time_slot", { ascending: true })
@@ -780,7 +780,7 @@ const Orders = () => {
       const { data, error } = await supabase
         .from("order_meals")
         .select(
-          "id, order_id, meal_id, meal_name, scheduled_date, scheduled_time_slot, status, quantity, unit_price, metadata, customer_note, created_at"
+          "id, order_id, assigned_rider_id, assigned_rider_name, assigned_rider_phone, meal_id, meal_name, scheduled_date, scheduled_time_slot, status, quantity, unit_price, metadata, customer_note, created_at"
         )
         .gte("scheduled_date", weekStartKey)
         .lte("scheduled_date", weekEndKey)
@@ -978,7 +978,7 @@ const Orders = () => {
   } = useQuery({
     queryKey: DELIVERY_RIDERS_QUERY_KEY,
     queryFn: fetchDeliveryRiders,
-    staleTime: 5 * 60 * 1000,
+    staleTime: 0,
     gcTime: 30 * 60 * 1000,
     refetchOnMount: true,
     refetchOnReconnect: false,
@@ -1077,7 +1077,7 @@ const Orders = () => {
       recovery_action?: NormalizedMealRecoveryAction | null;
     },
     successMessage: string,
-    options?: { silent?: boolean; refetch?: boolean; throwOnError?: boolean },
+    options?: { silent?: boolean; refetch?: boolean; throwOnError?: boolean; syncOrderStatus?: boolean },
   ) => {
     try {
       setUpdatingMealId(meal.id);
@@ -1164,36 +1164,38 @@ const Orders = () => {
         if (response.error) throw response.error;
       }
 
-      const refreshedOrderMealsResponse = await supabase
-        .from("order_meals")
-        .select("*")
-        .eq("order_id", order.id);
-
       let nextOrderStatus: OrderStatus | null = null;
 
-      if (!refreshedOrderMealsResponse.error) {
-        const refreshedMeals = ((refreshedOrderMealsResponse.data as OrderMealRowRecord[] | null) || []).map((row) =>
-          normalizeOrderMealRow(row),
-        );
-        nextOrderStatus = deriveOrderStatusFromMeals(refreshedMeals, order.status);
-      } else if (isMissingOrderMealsTableError(refreshedOrderMealsResponse.error)) {
-        const legacyPaymentRefs = Array.from(legacyRefsByPayment.keys());
-        const paymentRecordId = legacyPaymentRefs[0] || null;
+      if (options?.syncOrderStatus !== false) {
+        const refreshedOrderMealsResponse = await supabase
+          .from("order_meals")
+          .select("*")
+          .eq("order_id", order.id);
 
-        if (paymentRecordId) {
-          const { data: paymentRecord, error: paymentFetchError } = await supabase
-            .from("payments")
-            .select("payment_gateway_response")
-            .eq("id", paymentRecordId)
-            .single();
+        if (!refreshedOrderMealsResponse.error) {
+          const refreshedMeals = ((refreshedOrderMealsResponse.data as OrderMealRowRecord[] | null) || []).map((row) =>
+            normalizeOrderMealRow(row),
+          );
+          nextOrderStatus = deriveOrderStatusFromMeals(refreshedMeals, order.status);
+        } else if (isMissingOrderMealsTableError(refreshedOrderMealsResponse.error)) {
+          const legacyPaymentRefs = Array.from(legacyRefsByPayment.keys());
+          const paymentRecordId = legacyPaymentRefs[0] || null;
 
-          if (paymentFetchError) throw paymentFetchError;
+          if (paymentRecordId) {
+            const { data: paymentRecord, error: paymentFetchError } = await supabase
+              .from("payments")
+              .select("payment_gateway_response")
+              .eq("id", paymentRecordId)
+              .single();
 
-          const legacyMeals = parseLegacyMealSnapshot(order.id, paymentRecord?.payment_gateway_response);
-          nextOrderStatus = deriveOrderStatusFromMeals(legacyMeals, order.status);
+            if (paymentFetchError) throw paymentFetchError;
+
+            const legacyMeals = parseLegacyMealSnapshot(order.id, paymentRecord?.payment_gateway_response);
+            nextOrderStatus = deriveOrderStatusFromMeals(legacyMeals, order.status);
+          }
+        } else {
+          throw refreshedOrderMealsResponse.error;
         }
-      } else {
-        throw refreshedOrderMealsResponse.error;
       }
 
       if (nextOrderStatus) {
@@ -1219,7 +1221,7 @@ const Orders = () => {
         throw error;
       }
 
-      toast.error("Failed to update meal status");
+      toast.error(error instanceof Error ? error.message : "Failed to update meal");
       return false;
     } finally {
       setUpdatingMealId(null);
@@ -1230,7 +1232,7 @@ const Orders = () => {
     meal: NormalizedOrderMeal,
     order: Order,
     nextStatus: "scheduled" | "delivered",
-    options?: { silent?: boolean; refetch?: boolean; throwOnError?: boolean },
+    options?: { silent?: boolean; refetch?: boolean; throwOnError?: boolean; syncOrderStatus?: boolean },
   ) => {
     return updateMealRecord(
       meal,
@@ -1259,6 +1261,7 @@ const Orders = () => {
         assigned_rider_phone: rider?.phone_number || null,
       },
       rider ? `${rider.name} assigned to delivery` : "Delivery rider removed",
+      { syncOrderStatus: false },
     );
   };
 
@@ -2067,6 +2070,61 @@ const Orders = () => {
     { key: "requires-action", label: "Requires Action", value: subscriptionsDashboard.requiresActionCount, icon: AlertTriangle, tone: "text-red-700 bg-red-100" },
   ];
 
+  const renderRiderAssignmentControl = (row: OrderedMealRow) => (
+    <div className="space-y-2">
+      <div className="min-h-[40px]">
+        {row.meal.assigned_rider_name ? (
+          <div>
+            <p className="font-semibold text-foreground">{row.meal.assigned_rider_name}</p>
+            <p className="text-xs text-muted-foreground tabular-nums">
+              {row.meal.assigned_rider_phone || "-"}
+            </p>
+          </div>
+        ) : (
+          <Badge variant="outline" className="border-dashed text-muted-foreground">
+            Unassigned
+          </Badge>
+        )}
+      </div>
+
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            size="sm"
+            variant={row.meal.assigned_rider_id ? "outline" : "default"}
+            className="w-full rounded-lg"
+            disabled={updatingMealId === row.meal.id || deliveryRiders.length === 0}
+          >
+            <Truck className="w-4 h-4 mr-2" />
+            {row.meal.assigned_rider_id ? "Change" : "Assign"}
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-56">
+          {deliveryRiders.map((rider) => (
+            <DropdownMenuItem
+              key={rider.id}
+              onClick={() => void handleAssignDeliveryRider(row, rider.id)}
+            >
+              {rider.name}
+            </DropdownMenuItem>
+          ))}
+          {row.meal.assigned_rider_id && (
+            <DropdownMenuItem onClick={() => void handleAssignDeliveryRider(row, "unassigned")}>
+              Remove assignment
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      {deliveryRiders.length === 0 && (
+        <p className="text-[10px] text-muted-foreground text-center">
+          Add riders in Rider Management
+        </p>
+      )}
+    </div>
+  );
+
   const renderLoadMoreOrders = (emptyLabel = "Load more for this date") => (
     <div className="flex flex-col items-center gap-2 py-4">
       {hasNextPage ? (
@@ -2355,18 +2413,7 @@ const Orders = () => {
                             </div>
                           </TableCell>
                           <TableCell>
-                            {row.meal.assigned_rider_name ? (
-                              <div>
-                                <p className="font-semibold text-foreground">{row.meal.assigned_rider_name}</p>
-                                <p className="text-xs text-muted-foreground tabular-nums">
-                                  {row.meal.assigned_rider_phone || "-"}
-                                </p>
-                              </div>
-                            ) : (
-                              <Badge variant="outline" className="border-dashed text-muted-foreground">
-                                Unassigned
-                              </Badge>
-                            )}
+                            {renderRiderAssignmentControl(row)}
                           </TableCell>
                           <TableCell className="font-semibold tabular-nums">{row.meal.quantity}</TableCell>
                           <TableCell>
