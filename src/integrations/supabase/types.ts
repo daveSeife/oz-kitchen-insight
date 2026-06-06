@@ -822,6 +822,9 @@ export type Database = {
       profiles: {
         Row: {
           aau_campus: string | null
+          assigned_rider_id: string | null
+          assigned_rider_name: string | null
+          assigned_rider_phone: string | null
           created_at: string | null
           delivery_address: Json | null
           first_name: string | null
@@ -839,6 +842,9 @@ export type Database = {
         }
         Insert: {
           aau_campus?: string | null
+          assigned_rider_id?: string | null
+          assigned_rider_name?: string | null
+          assigned_rider_phone?: string | null
           created_at?: string | null
           delivery_address?: Json | null
           first_name?: string | null
@@ -856,6 +862,9 @@ export type Database = {
         }
         Update: {
           aau_campus?: string | null
+          assigned_rider_id?: string | null
+          assigned_rider_name?: string | null
+          assigned_rider_phone?: string | null
           created_at?: string | null
           delivery_address?: Json | null
           first_name?: string | null
@@ -872,6 +881,13 @@ export type Database = {
           updated_at?: string | null
         }
         Relationships: [
+          {
+            foreignKeyName: "profiles_assigned_rider_id_fkey"
+            columns: ["assigned_rider_id"]
+            isOneToOne: false
+            referencedRelation: "delivery_riders"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "fk_profiles_referral_partner"
             columns: ["referral_partner_id"]
