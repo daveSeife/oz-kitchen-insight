@@ -111,6 +111,9 @@ interface Order {
     first_name: string;
     last_name: string;
     phone_number?: string | null;
+    assigned_rider_id?: string | null;
+    assigned_rider_name?: string | null;
+    assigned_rider_phone?: string | null;
   };
   meals: NormalizedOrderMeal[];
 }
@@ -499,6 +502,7 @@ const Orders = () => {
   const [operationalFilter, setOperationalFilter] = useState<OperationalFilter>("all");
   const [subscriptionFilter, setSubscriptionFilter] = useState<SubscriptionFilter>("all");
   const [updatingMealId, setUpdatingMealId] = useState<string | null>(null);
+  const [updatingCustomerId, setUpdatingCustomerId] = useState<string | null>(null);
   const [selectedMealRowKeys, setSelectedMealRowKeys] = useState<string[]>([]);
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
   const [recoveryTargetRow, setRecoveryTargetRow] = useState<OrderedMealRow | null>(null);
@@ -574,7 +578,15 @@ const Orders = () => {
     ordersData: Tables<"orders">[],
     paymentsData: LatestPaymentRecord[],
     orderMealsData: OrderMealRowRecord[] | null,
-    profilesData: Array<{ id: string; first_name: string | null; last_name: string | null; phone_number: string | null }>,
+    profilesData: Array<{
+      id: string;
+      first_name: string | null;
+      last_name: string | null;
+      phone_number: string | null;
+      assigned_rider_id?: string | null;
+      assigned_rider_name?: string | null;
+      assigned_rider_phone?: string | null;
+    }>,
   ) => {
     const profileMap = Object.fromEntries(
       (profilesData || []).map((profile) => [
@@ -583,6 +595,9 @@ const Orders = () => {
           first_name: profile.first_name || "",
           last_name: profile.last_name || "",
           phone_number: profile.phone_number || "",
+          assigned_rider_id: profile.assigned_rider_id || null,
+          assigned_rider_name: profile.assigned_rider_name || null,
+          assigned_rider_phone: profile.assigned_rider_phone || null,
         },
       ]),
     );
@@ -662,7 +677,14 @@ const Orders = () => {
         ...order,
         status: order.status || "pending",
         payment_status: order.payment_status || "pending",
-        profiles: profileMap[order.user_id] || { first_name: "", last_name: "", phone_number: "" },
+        profiles: profileMap[order.user_id] || {
+          first_name: "",
+          last_name: "",
+          phone_number: "",
+          assigned_rider_id: null,
+          assigned_rider_name: null,
+          assigned_rider_phone: null,
+        },
         meals,
       };
     });
@@ -730,7 +752,10 @@ const Orders = () => {
     const [{ data: profilesData, error: profilesError }, { data: paymentsData, error: paymentsError }] =
       await Promise.all([
         userIds.length > 0
-          ? supabase.from("profiles").select("id, first_name, last_name, phone_number").in("id", userIds)
+          ? supabase
+              .from("profiles")
+              .select("id, first_name, last_name, phone_number, assigned_rider_id, assigned_rider_name, assigned_rider_phone")
+              .in("id", userIds)
           : Promise.resolve({ data: [], error: null }),
         orderIds.length > 0
           ? supabase
@@ -824,7 +849,10 @@ const Orders = () => {
     const [{ data: profilesData, error: profilesError }, { data: paymentsData, error: paymentsError }] =
       await Promise.all([
         userIds.length > 0
-          ? supabase.from("profiles").select("id, first_name, last_name, phone_number").in("id", userIds)
+          ? supabase
+              .from("profiles")
+              .select("id, first_name, last_name, phone_number, assigned_rider_id, assigned_rider_name, assigned_rider_phone")
+              .in("id", userIds)
           : Promise.resolve({ data: [], error: null }),
         normalizedOrderIds.length > 0
           ? supabase
@@ -1252,17 +1280,28 @@ const Orders = () => {
   const handleAssignDeliveryRider = async (row: OrderedMealRow, riderId: string) => {
     const rider = deliveryRiders.find((item) => item.id === riderId) || null;
 
-    await updateMealRecord(
-      row.meal,
-      row.order,
-      {
-        assigned_rider_id: rider?.id || null,
-        assigned_rider_name: rider?.name || null,
-        assigned_rider_phone: rider?.phone_number || null,
-      },
-      rider ? `${rider.name} assigned to delivery` : "Delivery rider removed",
-      { syncOrderStatus: false },
-    );
+    try {
+      setUpdatingCustomerId(row.order.user_id);
+
+      const { error } = await supabase
+        .from("profiles")
+        .update({
+          assigned_rider_id: rider?.id || null,
+          assigned_rider_name: rider?.name || null,
+          assigned_rider_phone: rider?.phone_number || null,
+        })
+        .eq("id", row.order.user_id);
+
+      if (error) throw error;
+
+      await queryClient.invalidateQueries({ queryKey: ORDERS_QUERY_KEY });
+      toast.success(rider ? `${rider.name} assigned to ${row.fullName || "customer"}` : "Customer rider assignment removed");
+    } catch (error) {
+      console.error("[Orders] handleAssignDeliveryRider error", error);
+      toast.error(error instanceof Error ? error.message : "Failed to update customer rider");
+    } finally {
+      setUpdatingCustomerId(null);
+    }
   };
 
   const filteredOrders = useMemo(() => {
@@ -1319,7 +1358,12 @@ const Orders = () => {
       const location = formatAddressText(order.delivery_address);
 
       return order.meals.map((meal) => ({
-        meal,
+        meal: {
+          ...meal,
+          assigned_rider_id: order.profiles.assigned_rider_id || meal.assigned_rider_id,
+          assigned_rider_name: order.profiles.assigned_rider_name || meal.assigned_rider_name,
+          assigned_rider_phone: order.profiles.assigned_rider_phone || meal.assigned_rider_phone,
+        },
         order,
         fullName,
         phone,
@@ -1359,7 +1403,12 @@ const Orders = () => {
       const location = formatAddressText(order.delivery_address);
 
       return order.meals.map((meal) => ({
-        meal,
+        meal: {
+          ...meal,
+          assigned_rider_id: order.profiles.assigned_rider_id || meal.assigned_rider_id,
+          assigned_rider_name: order.profiles.assigned_rider_name || meal.assigned_rider_name,
+          assigned_rider_phone: order.profiles.assigned_rider_phone || meal.assigned_rider_phone,
+        },
         order,
         fullName,
         phone,
@@ -1444,7 +1493,7 @@ const Orders = () => {
   );
 
   const deliveryManagementRows = useMemo(() => {
-    return baseFilteredOrderedMeals.filter((row) => {
+    const filteredRows = baseFilteredOrderedMeals.filter((row) => {
       const isUnassigned = !row.meal.assigned_rider_id && !row.meal.assigned_rider_name;
       const matchesUnassigned = !showUnassignedOnly || isUnassigned;
       const matchesRider =
@@ -1452,13 +1501,19 @@ const Orders = () => {
 
       return matchesUnassigned && matchesRider;
     });
+
+    return Array.from(
+      new Map(filteredRows.map((row) => [row.order.user_id, row])).values(),
+    ).sort((left, right) => left.fullName.localeCompare(right.fullName));
   }, [baseFilteredOrderedMeals, selectedDeliveryRider, showUnassignedOnly]);
 
   const selectedRiderAssignedCount = useMemo(() => {
     if (selectedDeliveryRider === "all") return 0;
-    return getMealQuantityTotal(
-      baseFilteredOrderedMeals.filter((row) => row.meal.assigned_rider_id === selectedDeliveryRider),
-    );
+    return new Set(
+      baseFilteredOrderedMeals
+        .filter((row) => row.meal.assigned_rider_id === selectedDeliveryRider)
+        .map((row) => row.order.user_id),
+    ).size;
   }, [baseFilteredOrderedMeals, selectedDeliveryRider]);
 
   const orderedMealsSummary = useMemo(() => {
@@ -2094,7 +2149,7 @@ const Orders = () => {
             size="sm"
             variant={row.meal.assigned_rider_id ? "outline" : "default"}
             className="w-full rounded-lg"
-            disabled={updatingMealId === row.meal.id || deliveryRiders.length === 0}
+            disabled={updatingCustomerId === row.order.user_id || deliveryRiders.length === 0}
           >
             <Truck className="w-4 h-4 mr-2" />
             {row.meal.assigned_rider_id ? "Change" : "Assign"}
@@ -2620,7 +2675,7 @@ const Orders = () => {
                           <TableCell>
                             <p className="font-semibold text-foreground">{row.fullName || "Unknown"}</p>
                             <p className="text-xs text-muted-foreground">
-                              {row.meal.meal_name} x{row.meal.quantity}
+                              {baseFilteredOrderedMeals.filter((mealRow) => mealRow.order.user_id === row.order.user_id).length} delivery rows in view
                             </p>
                           </TableCell>
                           <TableCell className="text-muted-foreground tabular-nums">{row.phone || "-"}</TableCell>
@@ -2655,7 +2710,7 @@ const Orders = () => {
                                   size="sm"
                                   variant={row.meal.assigned_rider_id ? "outline" : "default"}
                                   className="w-full rounded-lg"
-                                  disabled={updatingMealId === row.meal.id || deliveryRiders.length === 0}
+                                  disabled={updatingCustomerId === row.order.user_id || deliveryRiders.length === 0}
                                 >
                                   <Truck className="w-4 h-4 mr-2" />
                                   {row.meal.assigned_rider_id ? "Change" : "Assign"}
