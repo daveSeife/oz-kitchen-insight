@@ -1876,8 +1876,12 @@ const Orders = () => {
 
     const isActiveSubscription = (subscription: SubscriptionDashboardRow) => {
       const status = subscription.status.toLowerCase();
-      const inactiveStatuses = new Set(["cancelled", "canceled", "expired", "inactive", "failed", "completed"]);
+      const inactiveStatuses = new Set(["cancelled", "canceled", "inactive", "failed"]);
       const endDate = new Date(subscription.endDate);
+
+      if (subscription.remainingMeals > 0) {
+        return !inactiveStatuses.has(status);
+      }
 
       return !inactiveStatuses.has(status) && (Number.isNaN(endDate.getTime()) || endDate >= today);
     };
@@ -1891,8 +1895,7 @@ const Orders = () => {
         subscription.deliveredMeals >= subscription.totalMeals;
 
       return (
-        status === "completed" ||
-        status === "expired" ||
+        ((status === "completed" || status === "expired") && subscription.remainingMeals === 0) ||
         allKnownMealsDelivered ||
         (!Number.isNaN(endDate.getTime()) && endDate < today && subscription.remainingMeals === 0)
       );
