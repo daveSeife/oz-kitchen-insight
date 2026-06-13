@@ -160,6 +160,8 @@ type SubscriptionFilter =
   | "no-meals-scheduled"
   | "payment-pending"
   | "requires-action";
+type SubscriptionSortKey = "subscriber" | "remaining" | "nextMeal" | "ends";
+type SortDirection = "asc" | "desc";
 
 interface SubscriptionDashboardRow {
   id: string;
@@ -540,6 +542,10 @@ const Orders = () => {
   const [showUnassignedOnly, setShowUnassignedOnly] = useState(false);
   const [operationalFilter, setOperationalFilter] = useState<OperationalFilter>("all");
   const [subscriptionFilter, setSubscriptionFilter] = useState<SubscriptionFilter>("all");
+  const [subscriptionSort, setSubscriptionSort] = useState<{
+    key: SubscriptionSortKey;
+    direction: SortDirection;
+  } | null>(null);
   const [updatingMealId, setUpdatingMealId] = useState<string | null>(null);
   const [updatingCustomerId, setUpdatingCustomerId] = useState<string | null>(null);
   const [selectedMealRowKeys, setSelectedMealRowKeys] = useState<string[]>([]);
@@ -1896,10 +1902,17 @@ const Orders = () => {
       const paymentStatus = (subscription.paymentStatus || "").toLowerCase();
       return !isPaymentConfirmed(paymentStatus) && !isExcludedPaymentStatus(paymentStatus);
     };
+    const hasMatchedOrders = (subscription: SubscriptionDashboardRow) => subscription.orderCount > 0;
+    const hasMatchedMeals = (subscription: SubscriptionDashboardRow) => subscription.totalMeals > 0;
 
-    const completed = subscriptionRows.filter(isCompletedSubscription);
+    const completed = subscriptionRows.filter(
+      (subscription) => hasMatchedOrders(subscription) && isCompletedSubscription(subscription),
+    );
     const active = subscriptionRows.filter(
-      (subscription) => isActiveSubscription(subscription) && !isCompletedSubscription(subscription),
+      (subscription) =>
+        hasMatchedMeals(subscription) &&
+        isActiveSubscription(subscription) &&
+        !isCompletedSubscription(subscription),
     );
     const completingSoon = subscriptionRows.filter(
       (subscription) =>
@@ -1914,12 +1927,17 @@ const Orders = () => {
         !isCompletedSubscription(subscription) &&
         !subscription.hasFutureMeals,
     );
-    const paymentPending = subscriptionRows.filter(isUnpaidSubscription);
+    const paymentPending = subscriptionRows.filter(
+      (subscription) => hasMatchedOrders(subscription) && isUnpaidSubscription(subscription),
+    );
     const requiresAction = subscriptionRows.filter(
       (subscription) =>
-        completingSoon.some((row) => row.id === subscription.id) ||
-        noMealsScheduled.some((row) => row.id === subscription.id) ||
-        paymentPending.some((row) => row.id === subscription.id),
+        hasMatchedOrders(subscription) &&
+        (
+          completingSoon.some((row) => row.id === subscription.id) ||
+          noMealsScheduled.some((row) => row.id === subscription.id) ||
+          paymentPending.some((row) => row.id === subscription.id)
+        ),
     );
 
     const filteredRows = subscriptionRows.filter((subscription) => {
@@ -1944,10 +1962,38 @@ const Orders = () => {
 
       return true;
     });
+    const sortedFilteredRows = subscriptionSort
+      ? [...filteredRows].sort((left, right) => {
+          const direction = subscriptionSort.direction === "asc" ? 1 : -1;
+
+          if (subscriptionSort.key === "subscriber") {
+            return left.customerName.localeCompare(right.customerName) * direction;
+          }
+
+          if (subscriptionSort.key === "remaining") {
+            return (left.remainingMeals - right.remainingMeals) * direction;
+          }
+
+          const getDateValue = (value?: string | null) => {
+            if (!value) return null;
+            const date = new Date(value);
+            return Number.isNaN(date.getTime()) ? null : date.getTime();
+          };
+
+          const leftDate = getDateValue(subscriptionSort.key === "nextMeal" ? left.nextMealDate : left.endDate);
+          const rightDate = getDateValue(subscriptionSort.key === "nextMeal" ? right.nextMealDate : right.endDate);
+
+          if (leftDate === null && rightDate === null) return 0;
+          if (leftDate === null) return 1;
+          if (rightDate === null) return -1;
+
+          return (leftDate - rightDate) * direction;
+        })
+      : filteredRows;
 
     return {
       rows: subscriptionRows,
-      filteredRows,
+      filteredRows: sortedFilteredRows,
       activeCount: active.length,
       completingSoonCount: completingSoon.length,
       completedCount: completed.length,
@@ -1955,7 +2001,7 @@ const Orders = () => {
       paymentPendingCount: paymentPending.length,
       requiresActionCount: requiresAction.length,
     };
-  }, [search, subscriptionFilter, subscriptionRows]);
+  }, [search, subscriptionFilter, subscriptionRows, subscriptionSort]);
 
   const filteredOrderedMealKeys = useMemo(
     () => displayedFilteredOrderedMeals.map(getOrderedMealRowKey),
@@ -2418,6 +2464,38 @@ const Orders = () => {
     { key: "payment-pending", label: "Payment Pending", value: subscriptionsDashboard.paymentPendingCount, icon: CreditCard, tone: "text-amber-700 bg-amber-100" },
     { key: "requires-action", label: "Requires Action", value: subscriptionsDashboard.requiresActionCount, icon: AlertTriangle, tone: "text-red-700 bg-red-100" },
   ];
+
+  const handleSubscriptionSort = (key: SubscriptionSortKey) => {
+    setSubscriptionSort((current) => {
+      if (!current || current.key !== key) return { key, direction: "asc" };
+      if (current.direction === "asc") return { key, direction: "desc" };
+      return null;
+    });
+  };
+
+  const getSubscriptionSortLabel = (key: SubscriptionSortKey) => {
+    if (subscriptionSort?.key !== key) return "";
+    return subscriptionSort.direction === "asc" ? " asc" : " desc";
+  };
+
+  const renderSubscriptionSortHeader = (
+    key: SubscriptionSortKey,
+    label: string,
+    className = "",
+  ) => (
+    <TableHead className={className}>
+      <button
+        type="button"
+        className="flex items-center gap-1 rounded-md text-left font-medium transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        onClick={() => handleSubscriptionSort(key)}
+      >
+        <span>{label}</span>
+        <span className="text-[10px] uppercase text-muted-foreground">
+          {getSubscriptionSortLabel(key)}
+        </span>
+      </button>
+    </TableHead>
+  );
 
   const renderRiderAssignmentControl = (row: OrderedMealRow) => (
     <div className="space-y-2">
@@ -3212,14 +3290,14 @@ const Orders = () => {
                 <Table className="modern-table min-w-[940px]">
                   <TableHeader>
                     <TableRow className="hover:bg-transparent border-border/50">
-                      <TableHead className="min-w-[190px]">Subscriber</TableHead>
+                      {renderSubscriptionSortHeader("subscriber", "Subscriber", "min-w-[190px]")}
                       <TableHead className="min-w-[170px]">Plan</TableHead>
                       <TableHead className="w-[130px]">Status</TableHead>
                       <TableHead className="w-[140px]">Payment</TableHead>
                       <TableHead className="w-[130px]">Orders</TableHead>
-                      <TableHead className="w-[130px]">Remaining</TableHead>
-                      <TableHead className="w-[130px]">Next Meal</TableHead>
-                      <TableHead className="w-[130px]">Ends</TableHead>
+                      {renderSubscriptionSortHeader("remaining", "Remaining", "w-[130px]")}
+                      {renderSubscriptionSortHeader("nextMeal", "Next Meal", "w-[130px]")}
+                      {renderSubscriptionSortHeader("ends", "Ends", "w-[130px]")}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
