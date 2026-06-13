@@ -59,6 +59,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import {
   Table,
   TableBody,
   TableCell,
@@ -157,6 +164,7 @@ type SubscriptionFilter =
 interface SubscriptionDashboardRow {
   id: string;
   userId: string;
+  planId: string;
   customerName: string;
   phone: string;
   planName: string;
@@ -164,9 +172,27 @@ interface SubscriptionDashboardRow {
   paymentStatus: string;
   startDate: string;
   endDate: string;
+  orderCount: number;
+  totalMeals: number;
+  deliveredMeals: number;
   remainingMeals: number;
   hasFutureMeals: boolean;
   nextMealDate: string | null;
+  meals: SubscriptionMealDetail[];
+}
+
+interface SubscriptionMealDetail {
+  id: string;
+  orderId: string;
+  orderNumber: string;
+  orderPaymentStatus: string;
+  mealName: string;
+  mealType: string;
+  quantity: number;
+  status: NormalizedOrderMealStatus;
+  scheduledDate: string;
+  scheduledTimeSlot: string;
+  customerNote: string | null;
 }
 
 export const ORDERS_QUERY_KEY = ["orders"] as const;
@@ -189,7 +215,18 @@ const WEEKDAY_COLUMNS = [
   { label: "Friday", shortLabel: "Fri", dayOffset: 4 },
 ] as const;
 
+const SUPABASE_IN_FILTER_BATCH_SIZE = 25;
 const toDateKey = (date: Date) => format(date, "yyyy-MM-dd");
+
+const chunkArray = <T,>(items: T[], size: number) => {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+
+  return chunks;
+};
 
 const getMondayForWeek = (date: Date) => {
   const weekStart = new Date(date);
@@ -489,6 +526,8 @@ const Orders = () => {
   const [search, setSearch] = useState("");
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [selectedSubscription, setSelectedSubscription] = useState<SubscriptionDashboardRow | null>(null);
+  const [subscriptionSheetOpen, setSubscriptionSheetOpen] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [activeTab, setActiveTab] = useState("ordered-meals");
   const [startDate, setStartDate] = useState<Date | undefined>(undefined);
@@ -641,15 +680,19 @@ const Orders = () => {
       }
     }
 
-    const { data: mealCatalogData, error: mealCatalogError } =
-      mealIds.size > 0
-        ? await supabase.from("meals").select("id, name, meal_type").in("id", Array.from(mealIds))
-        : { data: [], error: null };
+    const mealCatalogData: Array<{ id: string; name: string; meal_type: string | null }> = [];
+    for (const mealIdBatch of chunkArray(Array.from(mealIds), SUPABASE_IN_FILTER_BATCH_SIZE)) {
+      const { data, error } = await supabase
+        .from("meals")
+        .select("id, name, meal_type")
+        .in("id", mealIdBatch);
 
-    if (mealCatalogError) throw mealCatalogError;
+      if (error) throw error;
+      mealCatalogData.push(...(data || []));
+    }
 
     const mealCatalogMap = new Map(
-      (mealCatalogData || []).map((meal) => [meal.id, meal]),
+      mealCatalogData.map((meal) => [meal.id, meal]),
     );
 
     const enrichMeal = (meal: NormalizedOrderMeal): NormalizedOrderMeal => {
@@ -884,6 +927,11 @@ const Orders = () => {
     const adminAccess = await getAdminAccess(user.id);
     const currentUserIsAdmin = adminAccess.hasAccess;
 
+    type SubscriptionDashboardQueryRow = Pick<
+      Tables<"user_subscriptions">,
+      "id" | "user_id" | "plan_id" | "status" | "payment_status" | "start_date" | "end_date" | "created_at"
+    >;
+
     let subscriptionsQuery = supabase
       .from("user_subscriptions")
       .select("id, user_id, plan_id, status, payment_status, start_date, end_date, created_at")
@@ -893,47 +941,294 @@ const Orders = () => {
       subscriptionsQuery = subscriptionsQuery.eq("user_id", user.id);
     }
 
-    const { data: subscriptionRows, error: subscriptionsError } = await subscriptionsQuery;
-    if (subscriptionsError) throw subscriptionsError;
+    const { data: subscriptionRowsData, error: subscriptionsError } = await subscriptionsQuery;
+    let subscriptionRows = (subscriptionRowsData || []) as SubscriptionDashboardQueryRow[];
+
+    if (subscriptionsError) {
+      console.warn(
+        "[Orders] user_subscriptions payment_status query failed; retrying without payment_status",
+        subscriptionsError,
+      );
+
+      let fallbackSubscriptionsQuery = supabase
+        .from("user_subscriptions")
+        .select("id, user_id, plan_id, status, start_date, end_date, created_at")
+        .order("created_at", { ascending: false });
+
+      if (!currentUserIsAdmin) {
+        fallbackSubscriptionsQuery = fallbackSubscriptionsQuery.eq("user_id", user.id);
+      }
+
+      const { data: fallbackSubscriptionRows, error: fallbackSubscriptionsError } =
+        await fallbackSubscriptionsQuery;
+
+      if (fallbackSubscriptionsError) throw fallbackSubscriptionsError;
+
+      subscriptionRows = (fallbackSubscriptionRows || []).map((subscription) => ({
+        ...subscription,
+        payment_status: "pending",
+      })) as SubscriptionDashboardQueryRow[];
+    }
 
     const userIds = Array.from(new Set((subscriptionRows || []).map((subscription) => subscription.user_id)));
     const planIds = Array.from(new Set((subscriptionRows || []).map((subscription) => subscription.plan_id)));
 
-    const [{ data: profilesData, error: profilesError }, { data: plansData, error: plansError }] =
-      await Promise.all([
-        userIds.length > 0
-          ? supabase.from("profiles").select("id, first_name, last_name, phone_number").in("id", userIds)
-          : Promise.resolve({ data: [], error: null }),
-        planIds.length > 0
-          ? supabase.from("subscription_plans").select("id, name").in("id", planIds)
-          : Promise.resolve({ data: [], error: null }),
-      ]);
-
-    if (profilesError) throw profilesError;
-    if (plansError) throw plansError;
-
-    const profileMap = new Map((profilesData || []).map((profile) => [profile.id, profile]));
-    const planMap = new Map((plansData || []).map((plan) => [plan.id, plan]));
-
-    return (subscriptionRows || []).map((subscription) => {
-      const profile = profileMap.get(subscription.user_id);
-      const plan = planMap.get(subscription.plan_id);
-
-      return {
+    const buildBaseSubscriptionRows = (): SubscriptionDashboardRow[] =>
+      (subscriptionRows || []).map((subscription) => ({
         id: subscription.id,
         userId: subscription.user_id,
-        customerName: `${profile?.first_name || ""} ${profile?.last_name || ""}`.trim() || "Unknown user",
-        phone: profile?.phone_number || "",
-        planName: plan?.name || "Unknown plan",
+        planId: subscription.plan_id,
+        customerName: "Unknown user",
+        phone: "",
+        planName: "Unknown plan",
         status: subscription.status || "unknown",
         paymentStatus: subscription.payment_status || "pending",
         startDate: subscription.start_date,
         endDate: subscription.end_date,
+        orderCount: 0,
+        totalMeals: 0,
+        deliveredMeals: 0,
         remainingMeals: 0,
         hasFutureMeals: false,
         nextMealDate: null,
+        meals: [],
+      }));
+
+    try {
+    const profilesData: Array<{
+      id: string;
+      first_name: string | null;
+      last_name: string | null;
+      phone_number: string | null;
+    }> = [];
+    const plansData: Array<{ id: string; name: string }> = [];
+
+    for (const userIdBatch of chunkArray(userIds, SUPABASE_IN_FILTER_BATCH_SIZE)) {
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("id, first_name, last_name, phone_number")
+        .in("id", userIdBatch);
+
+      if (error) throw error;
+      profilesData.push(...(data || []));
+    }
+
+    for (const planIdBatch of chunkArray(planIds, SUPABASE_IN_FILTER_BATCH_SIZE)) {
+      const { data, error } = await supabase
+        .from("subscription_plans")
+        .select("id, name")
+        .in("id", planIdBatch);
+
+      if (error) throw error;
+      plansData.push(...(data || []));
+    }
+
+    const ordersData: Tables<"orders">[] = [];
+    for (const userIdBatch of chunkArray(userIds, SUPABASE_IN_FILTER_BATCH_SIZE)) {
+      const { data, error } = await supabase
+        .from("orders")
+        .select(
+          "id, user_id, order_number, total_amount, status, payment_status, created_at, delivery_address, delivery_date, delivery_time_slot, notes, subtotal, delivery_fee, discount_amount, payment_method, meal_plan_id"
+        )
+        .in("user_id", userIdBatch);
+
+      if (error) throw error;
+      ordersData.push(...((data || []) as Tables<"orders">[]));
+    }
+
+    const orderIds = Array.from(new Set(ordersData.map((order) => order.id)));
+    const orderMealsData: OrderMealRowRecord[] = [];
+    const orderMealsPageSize = 1000;
+
+    for (const orderIdBatch of chunkArray(orderIds, SUPABASE_IN_FILTER_BATCH_SIZE)) {
+      let orderMealsOffset = 0;
+
+      while (orderIdBatch.length > 0) {
+        const { data, error } = await supabase
+          .from("order_meals")
+          .select(
+            "id, order_id, assigned_rider_id, assigned_rider_name, assigned_rider_phone, meal_id, meal_name, scheduled_date, scheduled_time_slot, status, quantity, unit_price, metadata, customer_note, created_at"
+          )
+          .in("order_id", orderIdBatch)
+          .order("scheduled_date", { ascending: true })
+          .order("scheduled_time_slot", { ascending: true })
+          .range(orderMealsOffset, orderMealsOffset + orderMealsPageSize - 1);
+
+        if (error) {
+          if (isMissingOrderMealsTableError(error)) break;
+          throw error;
+        }
+
+        const rows = (data || []) as OrderMealRowRecord[];
+        orderMealsData.push(...rows);
+        if (rows.length < orderMealsPageSize) break;
+        orderMealsOffset += orderMealsPageSize;
+      }
+    }
+
+    const paymentsData: LatestPaymentRecord[] = [];
+    for (const orderIdBatch of chunkArray(orderIds, SUPABASE_IN_FILTER_BATCH_SIZE)) {
+      const { data, error } = await supabase
+        .from("payments")
+        .select("id, order_id, payment_gateway_response, created_at")
+        .in("order_id", orderIdBatch)
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+      paymentsData.push(...((data || []) as LatestPaymentRecord[]));
+    }
+
+    const normalizedOrders = await normalizeOrders(
+      ordersData,
+      paymentsData,
+      orderMealsData,
+      profilesData || [],
+    );
+
+    const ordersByUser = new Map<string, Order[]>();
+    for (const order of normalizedOrders) {
+      const existing = ordersByUser.get(order.user_id) || [];
+      existing.push(order);
+      ordersByUser.set(order.user_id, existing);
+    }
+
+    const profileMap = new Map((profilesData || []).map((profile) => [profile.id, profile]));
+    const planMap = new Map((plansData || []).map((plan) => [plan.id, plan]));
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const isDateInSubscriptionWindow = (dateValue: string | null | undefined, startDate: string, endDate: string) => {
+      if (!dateValue) return false;
+      const date = new Date(dateValue);
+      const start = new Date(startDate);
+      const end = new Date(endDate);
+
+      if (Number.isNaN(date.getTime())) return false;
+      if (!Number.isNaN(start.getTime()) && date < start) return false;
+      if (!Number.isNaN(end.getTime()) && date > end) return false;
+
+      return true;
+    };
+
+    const isOrderInSubscription = (
+      order: Order,
+      subscription: Pick<Tables<"user_subscriptions">, "user_id" | "plan_id" | "start_date" | "end_date">,
+    ) => {
+      if (order.user_id !== subscription.user_id) return false;
+
+      const planMatches = order.meal_plan_id === subscription.plan_id;
+      const planUnknown = !order.meal_plan_id;
+      const orderDateMatches = isDateInSubscriptionWindow(
+        order.delivery_date || order.created_at,
+        subscription.start_date,
+        subscription.end_date,
+      );
+      const mealDateMatches = order.meals.some((meal) =>
+        isDateInSubscriptionWindow(meal.scheduled_date, subscription.start_date, subscription.end_date),
+      );
+
+      return planMatches || (planUnknown && (orderDateMatches || mealDateMatches));
+    };
+
+    return (subscriptionRows || []).map((subscription) => {
+      const profile = profileMap.get(subscription.user_id);
+      const plan = planMap.get(subscription.plan_id);
+      const subscriptionOrders = (ordersByUser.get(subscription.user_id) || []).filter((order) =>
+        isOrderInSubscription(order, subscription),
+      );
+      const meals = subscriptionOrders
+        .flatMap((order) =>
+          order.meals.map((meal) => ({
+            id: `${order.id}:${getMealRefKey(meal)}`,
+            orderId: order.id,
+            orderNumber: order.order_number,
+            orderPaymentStatus: order.payment_status || "pending",
+            mealName: meal.meal_name,
+            mealType: meal.meal_type,
+            quantity: meal.quantity || 0,
+            status: meal.status,
+            scheduledDate: meal.scheduled_date,
+            scheduledTimeSlot: meal.scheduled_time_slot,
+            customerNote: meal.customer_note,
+          })),
+        )
+        .sort((left, right) =>
+          [
+            left.scheduledDate || "",
+            left.scheduledTimeSlot || "",
+            left.mealName.toLowerCase(),
+          ]
+            .join("::")
+            .localeCompare(
+              [
+                right.scheduledDate || "",
+                right.scheduledTimeSlot || "",
+                right.mealName.toLowerCase(),
+              ].join("::"),
+            ),
+        );
+      const activeMeals = meals.filter((meal) => !isInactiveMealStatus(meal.status));
+      const futureMeals = activeMeals.filter((meal) => {
+        if (meal.status === "delivered") return false;
+        const scheduledAt = getMealDateTime({
+          scheduled_date: meal.scheduledDate,
+          scheduled_time_slot: meal.scheduledTimeSlot,
+        } as NormalizedOrderMeal);
+        return scheduledAt ? scheduledAt >= today : false;
+      });
+      const sortedFutureMeals = [...futureMeals].sort((left, right) => {
+        const leftTime = getMealDateTime({
+          scheduled_date: left.scheduledDate,
+          scheduled_time_slot: left.scheduledTimeSlot,
+        } as NormalizedOrderMeal)?.getTime() || Number.MAX_SAFE_INTEGER;
+        const rightTime = getMealDateTime({
+          scheduled_date: right.scheduledDate,
+          scheduled_time_slot: right.scheduledTimeSlot,
+        } as NormalizedOrderMeal)?.getTime() || Number.MAX_SAFE_INTEGER;
+
+        return leftTime - rightTime;
+      });
+      const paidOrderCount = subscriptionOrders.filter((order) => isPaymentConfirmed(order.payment_status)).length;
+      const unpaidOrderCount = subscriptionOrders.filter((order) => isPendingPaymentStatus(order.payment_status)).length;
+      const resolvedPaymentStatus =
+        subscriptionOrders.length === 0
+          ? subscription.payment_status || "pending"
+          : paidOrderCount === subscriptionOrders.length
+            ? "paid"
+            : paidOrderCount > 0 && unpaidOrderCount > 0
+              ? "partial"
+              : subscriptionOrders.some((order) => order.payment_status === "failed")
+                ? "failed"
+                : subscriptionOrders.some((order) => order.payment_status === "refunded")
+                  ? "refunded"
+                  : "pending";
+
+      return {
+        id: subscription.id,
+        userId: subscription.user_id,
+        planId: subscription.plan_id,
+        customerName: `${profile?.first_name || ""} ${profile?.last_name || ""}`.trim() || "Unknown user",
+        phone: profile?.phone_number || "",
+        planName: plan?.name || "Unknown plan",
+        status: subscription.status || "unknown",
+        paymentStatus: resolvedPaymentStatus,
+        startDate: subscription.start_date,
+        endDate: subscription.end_date,
+        orderCount: subscriptionOrders.length,
+        totalMeals: meals.reduce((sum, meal) => sum + meal.quantity, 0),
+        deliveredMeals: meals
+          .filter((meal) => meal.status === "delivered")
+          .reduce((sum, meal) => sum + meal.quantity, 0),
+        remainingMeals: futureMeals.reduce((sum, meal) => sum + meal.quantity, 0),
+        hasFutureMeals: futureMeals.length > 0,
+        nextMealDate: sortedFutureMeals[0]?.scheduledDate || null,
+        meals,
       } satisfies SubscriptionDashboardRow;
     });
+    } catch (error) {
+      console.error("[Orders] fetchSubscriptions enrichment error", error);
+      return buildBaseSubscriptionRows();
+    }
   };
 
   const fetchDeliveryRiders = async () => {
@@ -1573,33 +1868,6 @@ const Orders = () => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    const futureMealsByUser = new Map<string, OrderedMealRow[]>();
-    for (const row of orderedMealRows) {
-      if (isInactiveMealStatus(row.meal.status) || row.meal.status === "delivered") continue;
-      const scheduledAt = getMealDateTime(row.meal);
-      if (!scheduledAt || scheduledAt < today) continue;
-
-      const existing = futureMealsByUser.get(row.order.user_id) || [];
-      existing.push(row);
-      futureMealsByUser.set(row.order.user_id, existing);
-    }
-
-    const rows = subscriptionRows.map((subscription) => {
-      const futureMeals = futureMealsByUser.get(subscription.userId) || [];
-      const sortedFutureMeals = [...futureMeals].sort((left, right) => {
-        const leftTime = getMealDateTime(left.meal)?.getTime() || Number.MAX_SAFE_INTEGER;
-        const rightTime = getMealDateTime(right.meal)?.getTime() || Number.MAX_SAFE_INTEGER;
-        return leftTime - rightTime;
-      });
-
-      return {
-        ...subscription,
-        remainingMeals: getMealQuantityTotal(futureMeals),
-        hasFutureMeals: futureMeals.length > 0,
-        nextMealDate: sortedFutureMeals[0]?.meal.scheduled_date || null,
-      };
-    });
-
     const isActiveSubscription = (subscription: SubscriptionDashboardRow) => {
       const status = subscription.status.toLowerCase();
       const inactiveStatuses = new Set(["cancelled", "canceled", "expired", "inactive", "failed", "completed"]);
@@ -1611,24 +1879,50 @@ const Orders = () => {
     const isCompletedSubscription = (subscription: SubscriptionDashboardRow) => {
       const status = subscription.status.toLowerCase();
       const endDate = new Date(subscription.endDate);
-      return status === "completed" || status === "expired" || (!Number.isNaN(endDate.getTime()) && endDate < today);
+      const allKnownMealsDelivered =
+        subscription.totalMeals > 0 &&
+        subscription.remainingMeals === 0 &&
+        subscription.deliveredMeals >= subscription.totalMeals;
+
+      return (
+        status === "completed" ||
+        status === "expired" ||
+        allKnownMealsDelivered ||
+        (!Number.isNaN(endDate.getTime()) && endDate < today && subscription.remainingMeals === 0)
+      );
     };
 
-    const active = rows.filter(isActiveSubscription);
-    const completingSoon = rows.filter(
-      (subscription) => isActiveSubscription(subscription) && subscription.remainingMeals > 0 && subscription.remainingMeals <= LOW_REMAINING_MEALS_THRESHOLD,
+    const isUnpaidSubscription = (subscription: SubscriptionDashboardRow) => {
+      const paymentStatus = (subscription.paymentStatus || "").toLowerCase();
+      return !isPaymentConfirmed(paymentStatus) && !isExcludedPaymentStatus(paymentStatus);
+    };
+
+    const completed = subscriptionRows.filter(isCompletedSubscription);
+    const active = subscriptionRows.filter(
+      (subscription) => isActiveSubscription(subscription) && !isCompletedSubscription(subscription),
     );
-    const completed = rows.filter(isCompletedSubscription);
-    const noMealsScheduled = rows.filter((subscription) => isActiveSubscription(subscription) && !subscription.hasFutureMeals);
-    const paymentPending = rows.filter((subscription) => isPendingPaymentStatus(subscription.paymentStatus));
-    const requiresAction = rows.filter(
+    const completingSoon = subscriptionRows.filter(
+      (subscription) =>
+        isActiveSubscription(subscription) &&
+        !isCompletedSubscription(subscription) &&
+        subscription.remainingMeals > 0 &&
+        subscription.remainingMeals <= LOW_REMAINING_MEALS_THRESHOLD,
+    );
+    const noMealsScheduled = subscriptionRows.filter(
+      (subscription) =>
+        isActiveSubscription(subscription) &&
+        !isCompletedSubscription(subscription) &&
+        !subscription.hasFutureMeals,
+    );
+    const paymentPending = subscriptionRows.filter(isUnpaidSubscription);
+    const requiresAction = subscriptionRows.filter(
       (subscription) =>
         completingSoon.some((row) => row.id === subscription.id) ||
         noMealsScheduled.some((row) => row.id === subscription.id) ||
         paymentPending.some((row) => row.id === subscription.id),
     );
 
-    const filteredRows = rows.filter((subscription) => {
+    const filteredRows = subscriptionRows.filter((subscription) => {
       const haystack = [
         subscription.customerName,
         subscription.phone,
@@ -1652,7 +1946,7 @@ const Orders = () => {
     });
 
     return {
-      rows,
+      rows: subscriptionRows,
       filteredRows,
       activeCount: active.length,
       completingSoonCount: completingSoon.length,
@@ -1661,7 +1955,7 @@ const Orders = () => {
       paymentPendingCount: paymentPending.length,
       requiresActionCount: requiresAction.length,
     };
-  }, [orderedMealRows, search, subscriptionFilter, subscriptionRows]);
+  }, [search, subscriptionFilter, subscriptionRows]);
 
   const filteredOrderedMealKeys = useMemo(
     () => displayedFilteredOrderedMeals.map(getOrderedMealRowKey),
@@ -2922,6 +3216,7 @@ const Orders = () => {
                       <TableHead className="min-w-[170px]">Plan</TableHead>
                       <TableHead className="w-[130px]">Status</TableHead>
                       <TableHead className="w-[140px]">Payment</TableHead>
+                      <TableHead className="w-[130px]">Orders</TableHead>
                       <TableHead className="w-[130px]">Remaining</TableHead>
                       <TableHead className="w-[130px]">Next Meal</TableHead>
                       <TableHead className="w-[130px]">Ends</TableHead>
@@ -2930,7 +3225,7 @@ const Orders = () => {
                   <TableBody>
                     {subscriptionsLoading ? (
                       <TableRow>
-                        <TableCell colSpan={7} className="text-center py-12">
+                        <TableCell colSpan={8} className="text-center py-12">
                           <div className="flex flex-col items-center gap-3">
                             <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
                             <p className="text-sm text-muted-foreground">Loading subscriptions...</p>
@@ -2939,7 +3234,7 @@ const Orders = () => {
                       </TableRow>
                     ) : subscriptionsDashboard.filteredRows.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={7} className="text-center py-12">
+                        <TableCell colSpan={8} className="text-center py-12">
                           <div className="flex flex-col items-center gap-3">
                             <UserCheck className="w-10 h-10 text-muted-foreground/30" />
                             <p className="text-sm text-muted-foreground">No subscriptions found</p>
@@ -2948,7 +3243,14 @@ const Orders = () => {
                       </TableRow>
                     ) : (
                       subscriptionsDashboard.filteredRows.map((subscription) => (
-                        <TableRow key={subscription.id} className="border-border/50">
+                        <TableRow
+                          key={subscription.id}
+                          className="cursor-pointer border-border/50 transition-colors hover:bg-muted/50"
+                          onClick={() => {
+                            setSelectedSubscription(subscription);
+                            setSubscriptionSheetOpen(true);
+                          }}
+                        >
                           <TableCell>
                             <p className="font-semibold text-foreground">{subscription.customerName}</p>
                             <p className="text-xs text-muted-foreground tabular-nums">{subscription.phone || "-"}</p>
@@ -2963,6 +3265,9 @@ const Orders = () => {
                             <Badge variant="outline" className={`text-[10px] border-0 ring-1 ring-inset ${getPaymentStatusTone(subscription.paymentStatus)}`}>
                               {formatPaymentStatus(subscription.paymentStatus)}
                             </Badge>
+                          </TableCell>
+                          <TableCell className="text-muted-foreground tabular-nums">
+                            {subscription.orderCount} / {subscription.totalMeals} meals
                           </TableCell>
                           <TableCell className="font-semibold tabular-nums">{subscription.remainingMeals}</TableCell>
                           <TableCell className="text-muted-foreground tabular-nums">{subscription.nextMealDate || "-"}</TableCell>
@@ -3345,6 +3650,129 @@ const Orders = () => {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        <Sheet open={subscriptionSheetOpen} onOpenChange={setSubscriptionSheetOpen}>
+          <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-xl">
+            {selectedSubscription && (
+              <div className="space-y-6">
+                <SheetHeader>
+                  <SheetTitle>{selectedSubscription.customerName}</SheetTitle>
+                  <SheetDescription>
+                    Subscription details, remaining meals, and the full delivery schedule across all matched orders.
+                  </SheetDescription>
+                </SheetHeader>
+
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-xl border border-border/50 bg-muted/20 p-3">
+                    <p className="text-xs text-muted-foreground">Remaining</p>
+                    <p className="text-2xl font-heading font-bold tabular-nums">
+                      {selectedSubscription.remainingMeals}
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-border/50 bg-muted/20 p-3">
+                    <p className="text-xs text-muted-foreground">Delivered</p>
+                    <p className="text-2xl font-heading font-bold tabular-nums">
+                      {selectedSubscription.deliveredMeals}
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-border/50 bg-muted/20 p-3">
+                    <p className="text-xs text-muted-foreground">Total Meals</p>
+                    <p className="text-2xl font-heading font-bold tabular-nums">
+                      {selectedSubscription.totalMeals}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-border/50 bg-card p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Plan</p>
+                      <p className="font-semibold text-foreground">{selectedSubscription.planName}</p>
+                    </div>
+                    <Badge variant="outline" className="text-[10px] border-0 ring-1 ring-inset bg-muted/70 text-muted-foreground">
+                      {selectedSubscription.status}
+                    </Badge>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Payment</p>
+                      <Badge variant="outline" className={`mt-1 text-[10px] border-0 ring-1 ring-inset ${getPaymentStatusTone(selectedSubscription.paymentStatus)}`}>
+                        {formatPaymentStatus(selectedSubscription.paymentStatus)}
+                      </Badge>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Phone</p>
+                      <p className="text-sm font-medium tabular-nums">{selectedSubscription.phone || "-"}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Start</p>
+                      <p className="text-sm font-medium tabular-nums">
+                        {selectedSubscription.startDate ? new Date(selectedSubscription.startDate).toLocaleDateString() : "-"}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">End</p>
+                      <p className="text-sm font-medium tabular-nums">
+                        {selectedSubscription.endDate ? new Date(selectedSubscription.endDate).toLocaleDateString() : "-"}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="font-heading font-bold text-lg">Meal Schedule</h3>
+                      <p className="text-sm text-muted-foreground">
+                        {selectedSubscription.orderCount} matched orders, {selectedSubscription.meals.length} meal rows.
+                      </p>
+                    </div>
+                    <Badge variant="outline" className="text-xs">
+                      Next: {selectedSubscription.nextMealDate || "-"}
+                    </Badge>
+                  </div>
+
+                  {selectedSubscription.meals.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-border/70 p-8 text-center">
+                      <CalendarX className="mx-auto mb-2 h-8 w-8 text-muted-foreground/30" />
+                      <p className="text-sm text-muted-foreground">
+                        No meals are attached to this subscription yet.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {selectedSubscription.meals.map((meal) => (
+                        <div key={meal.id} className="rounded-xl border border-border/50 bg-muted/20 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="font-semibold text-foreground">{meal.mealName}</p>
+                              <p className="text-xs text-muted-foreground">
+                                {meal.scheduledDate || "No date"}
+                                {meal.scheduledTimeSlot ? `, ${meal.scheduledTimeSlot}` : ""}
+                                {meal.mealType ? ` - ${meal.mealType}` : ""}
+                              </p>
+                              <p className="mt-1 text-[11px] text-muted-foreground tabular-nums">
+                                Order {meal.orderNumber} - Qty {meal.quantity}
+                              </p>
+                              {meal.customerNote && (
+                                <p className="mt-2 rounded-lg bg-background/70 px-2 py-1 text-xs text-muted-foreground">
+                                  {meal.customerNote}
+                                </p>
+                              )}
+                            </div>
+                            <Badge className={`${getMealStatusColor(meal.status)} border-0 text-[10px]`}>
+                              {meal.status}
+                            </Badge>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </SheetContent>
+        </Sheet>
 
         <OrderDetailSheet open={sheetOpen} onOpenChange={setSheetOpen} order={selectedOrder} onUpdate={invalidateOrders} />
 
