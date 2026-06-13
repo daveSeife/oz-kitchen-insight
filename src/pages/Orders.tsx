@@ -1896,8 +1896,11 @@ const Orders = () => {
       const paymentStatus = (subscription.paymentStatus || "").toLowerCase();
       return !isPaymentConfirmed(paymentStatus) && !isExcludedPaymentStatus(paymentStatus);
     };
+    const hasMatchedOrders = (subscription: SubscriptionDashboardRow) => subscription.orderCount > 0;
 
-    const completed = subscriptionRows.filter(isCompletedSubscription);
+    const completed = subscriptionRows.filter(
+      (subscription) => hasMatchedOrders(subscription) && isCompletedSubscription(subscription),
+    );
     const active = subscriptionRows.filter(
       (subscription) => isActiveSubscription(subscription) && !isCompletedSubscription(subscription),
     );
@@ -1914,12 +1917,17 @@ const Orders = () => {
         !isCompletedSubscription(subscription) &&
         !subscription.hasFutureMeals,
     );
-    const paymentPending = subscriptionRows.filter(isUnpaidSubscription);
+    const paymentPending = subscriptionRows.filter(
+      (subscription) => hasMatchedOrders(subscription) && isUnpaidSubscription(subscription),
+    );
     const requiresAction = subscriptionRows.filter(
       (subscription) =>
-        completingSoon.some((row) => row.id === subscription.id) ||
-        noMealsScheduled.some((row) => row.id === subscription.id) ||
-        paymentPending.some((row) => row.id === subscription.id),
+        hasMatchedOrders(subscription) &&
+        (
+          completingSoon.some((row) => row.id === subscription.id) ||
+          noMealsScheduled.some((row) => row.id === subscription.id) ||
+          paymentPending.some((row) => row.id === subscription.id)
+        ),
     );
 
     const filteredRows = subscriptionRows.filter((subscription) => {
