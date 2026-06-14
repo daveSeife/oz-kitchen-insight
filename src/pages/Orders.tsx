@@ -497,6 +497,9 @@ const isPendingDeliveryMeal = (row: OrderedMealRow) => {
 
 const isUnaccountedMeal = (row: OrderedMealRow) => !VALID_MEAL_STATUSES.has(row.meal.status);
 
+const isFutureDeliverableMealStatus = (status: NormalizedOrderMealStatus) =>
+  status === "scheduled" || status === "modified" || status === "rescheduled";
+
 const deriveOrderStatusFromMeals = (meals: NormalizedOrderMeal[], currentStatus?: string | null): OrderStatus => {
   if (meals.length === 0) {
     return (currentStatus as OrderStatus) || "pending";
@@ -1132,8 +1135,13 @@ const Orders = () => {
       const mealDateMatches = order.meals.some((meal) =>
         isDateInSubscriptionWindow(meal.scheduled_date, subscription.start_date, subscription.end_date),
       );
+      const hasFutureDeliverableMeal = order.meals.some((meal) => {
+        if (!isFutureDeliverableMealStatus(meal.status)) return false;
+        const scheduledAt = getMealDateTime(meal);
+        return scheduledAt ? scheduledAt >= today : false;
+      });
 
-      return planMatches || (planUnknown && (orderDateMatches || mealDateMatches));
+      return planMatches || (planUnknown && (orderDateMatches || mealDateMatches || hasFutureDeliverableMeal));
     };
 
     return (subscriptionRows || []).map((subscription) => {
@@ -1905,6 +1913,16 @@ const Orders = () => {
       const paymentStatus = (subscription.paymentStatus || "").toLowerCase();
       return !isPaymentConfirmed(paymentStatus) && !isExcludedPaymentStatus(paymentStatus);
     };
+    const hasFutureDeliverableMeals = (subscription: SubscriptionDashboardRow) =>
+      subscription.meals.some((meal) => {
+        if (!isFutureDeliverableMealStatus(meal.status)) return false;
+        const scheduledAt = getMealDateTime({
+          scheduled_date: meal.scheduledDate,
+          scheduled_time_slot: meal.scheduledTimeSlot,
+        } as NormalizedOrderMeal);
+
+        return scheduledAt ? scheduledAt >= today : false;
+      });
     const hasMatchedOrders = (subscription: SubscriptionDashboardRow) => subscription.orderCount > 0;
     const hasMatchedMeals = (subscription: SubscriptionDashboardRow) => subscription.totalMeals > 0;
 
@@ -1913,7 +1931,9 @@ const Orders = () => {
     );
     const active = subscriptionRows.filter(
       (subscription) =>
+        subscription.remainingMeals > 0 &&
         hasMatchedMeals(subscription) &&
+        hasFutureDeliverableMeals(subscription) &&
         isActiveSubscription(subscription) &&
         !isCompletedSubscription(subscription),
     );
