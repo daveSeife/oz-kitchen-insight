@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
 import { Input } from "@/components/ui/input";
-import { Search, Users as UsersIcon, ShieldCheck, MoreVertical } from "lucide-react";
+import { Search, Users as UsersIcon, ShieldCheck, MoreVertical, WalletCards } from "lucide-react";
 import { toast } from "sonner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
@@ -10,10 +10,12 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { getAdminAccess } from "@/lib/adminAuth";
 import { motion } from "framer-motion";
 import { UserDetailSheet } from "@/components/users/UserDetailSheet";
+import { Switch } from "@/components/ui/switch";
 
 interface Profile {
   id: string; first_name: string; last_name: string; phone_number: string;
   role: string; created_at: string; referral_partner_id: string;
+  use_alternate_account?: boolean | null;
   admin_role?: string; is_admin?: boolean;
 }
 
@@ -76,6 +78,28 @@ const Users = () => {
     }
   };
 
+  const toggleAlternateAccount = async (userId: string, enabled: boolean) => {
+    const previousUsers = users;
+    setUsers((current) =>
+      current.map((user) =>
+        user.id === userId ? { ...user, use_alternate_account: enabled } : user
+      )
+    );
+
+    try {
+      const { error } = await supabase
+        .from("profiles")
+        .update({ use_alternate_account: enabled })
+        .eq("id", userId);
+
+      if (error) throw error;
+      toast.success(enabled ? "Alternate account enabled" : "Default account restored");
+    } catch (error: any) {
+      setUsers(previousUsers);
+      toast.error(error.message || "Failed to update payment account");
+    }
+  };
+
   const filteredUsers = users.filter((user) =>
     `${user.first_name} ${user.last_name}`.toLowerCase().includes(search.toLowerCase()) ||
     user.phone_number?.toLowerCase().includes(search.toLowerCase())
@@ -109,6 +133,7 @@ const Users = () => {
               <TableRow className="hover:bg-transparent border-border/50">
                 <TableHead>Name</TableHead>
                 <TableHead>Phone</TableHead>
+                <TableHead>Payment Account</TableHead>
                 <TableHead>Admin Role</TableHead>
                 <TableHead>Referred</TableHead>
                 <TableHead>Joined</TableHead>
@@ -118,7 +143,7 @@ const Users = () => {
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={currentUserIsSuperAdmin ? 6 : 5} className="text-center py-12">
+                  <TableCell colSpan={currentUserIsSuperAdmin ? 7 : 6} className="text-center py-12">
                     <div className="flex flex-col items-center gap-3">
                       <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
                       <p className="text-sm text-muted-foreground">Loading users...</p>
@@ -127,7 +152,7 @@ const Users = () => {
                 </TableRow>
               ) : filteredUsers.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={currentUserIsSuperAdmin ? 6 : 5} className="text-center py-12">
+                  <TableCell colSpan={currentUserIsSuperAdmin ? 7 : 6} className="text-center py-12">
                     <div className="flex flex-col items-center gap-3">
                       <UsersIcon className="w-10 h-10 text-muted-foreground/30" />
                       <p className="text-sm text-muted-foreground">No users found</p>
@@ -152,6 +177,19 @@ const Users = () => {
                       </div>
                     </TableCell>
                     <TableCell className="text-muted-foreground tabular-nums">{user.phone_number || "-"}</TableCell>
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      <div className="flex items-center gap-3">
+                        <Switch
+                          checked={Boolean(user.use_alternate_account)}
+                          onCheckedChange={(checked) => toggleAlternateAccount(user.id, checked)}
+                          aria-label={`Use alternate payment account for ${user.first_name} ${user.last_name}`}
+                        />
+                        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                          <WalletCards className="w-3.5 h-3.5" />
+                          {user.use_alternate_account ? "Bethlehem" : "Dawit"}
+                        </span>
+                      </div>
+                    </TableCell>
                     <TableCell>
                       {user.is_admin ? (
                         <span className="status-badge status-active">
