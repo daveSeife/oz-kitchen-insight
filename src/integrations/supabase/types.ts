@@ -839,6 +839,7 @@ export type Database = {
           telegram_id: number | null
           telegram_username: string | null
           updated_at: string | null
+          use_alternate_account: boolean
         }
         Insert: {
           aau_campus?: string | null
@@ -859,6 +860,7 @@ export type Database = {
           telegram_id?: number | null
           telegram_username?: string | null
           updated_at?: string | null
+          use_alternate_account?: boolean
         }
         Update: {
           aau_campus?: string | null
@@ -879,6 +881,7 @@ export type Database = {
           telegram_id?: number | null
           telegram_username?: string | null
           updated_at?: string | null
+          use_alternate_account?: boolean
         }
         Relationships: [
           {
