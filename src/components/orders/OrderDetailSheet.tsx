@@ -8,9 +8,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { toast } from "sonner";
 import { CheckCircle, AlertCircle } from "lucide-react";
 import {
+  expandOrderMealInstances,
   formatAddressText,
   getDeliveryContactName,
   getDeliveryContactPhone,
+  getMealInstanceLabel,
   getMealDayName,
   normalizeDeliveryAddress,
   type NormalizedOrderMeal,
@@ -92,7 +94,7 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
 
   if (!order) return null;
 
-  const meals = sortNormalizedMeals(order.meals || []);
+  const meals = sortNormalizedMeals(expandOrderMealInstances(order.meals || []));
   const deliveryAddress = normalizeDeliveryAddress(order.delivery_address);
   const customerName = getDeliveryContactName(
     order.delivery_address,
@@ -385,7 +387,14 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div>
-                          <p className="font-medium">{meal.meal_name}</p>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="font-medium">{meal.meal_name}</p>
+                            {getMealInstanceLabel(meal) && (
+                              <Badge variant="secondary" className="text-[10px]">
+                                {getMealInstanceLabel(meal)}
+                              </Badge>
+                            )}
+                          </div>
                           <p className="text-sm text-muted-foreground capitalize">{meal.meal_type}</p>
                         </div>
                         <Badge variant="outline" className="capitalize">
@@ -407,8 +416,8 @@ export const OrderDetailSheet = ({ open, onOpenChange, order, onUpdate }: OrderD
                           <p>{meal.scheduled_time_slot || "-"}</p>
                         </div>
                         <div>
-                          <p className="text-muted-foreground">Quantity</p>
-                          <p>{meal.quantity}</p>
+                          <p className="text-muted-foreground">Meal Instance</p>
+                          <p>{getMealInstanceLabel(meal) || "Meal 1"}</p>
                         </div>
                         <div>
                           <p className="text-muted-foreground">Price Snapshot</p>

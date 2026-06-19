@@ -81,8 +81,10 @@ import { getAdminAccess } from "@/lib/adminAuth";
 import { exportToCSV, exportToExcel } from "@/lib/csvExport";
 import {
   formatAddressText,
+  expandOrderMealInstances,
   getDeliveryContactName,
   getDeliveryContactPhone,
+  getMealInstanceLabel,
   getMealDayName,
   normalizeDeliveryAddress,
   type NormalizedMealRecoveryAction,
@@ -436,10 +438,17 @@ const dedupeMeals = (meals: NormalizedOrderMeal[]) => {
   return Array.from(deduped.values());
 };
 
-const getOrderedMealRowKey = (row: OrderedMealRow) => `${row.order.id}::${getMealRefKey(row.meal)}`;
+const getOrderedMealInstanceKey = (meal: NormalizedOrderMeal) =>
+  meal.quantity_instance_index ? `::instance:${meal.quantity_instance_index}` : "";
+
+const getOrderedMealRowKey = (row: OrderedMealRow) =>
+  `${row.order.id}::${getMealRefKey(row.meal)}${getOrderedMealInstanceKey(row.meal)}`;
 
 const getMealQuantityTotal = (rows: OrderedMealRow[]) =>
   rows.reduce((sum, row) => sum + (row.meal.quantity || 0), 0);
+
+const ORDER_MEAL_SELECT_FIELDS =
+  "id, order_id, assigned_rider_id, assigned_rider_name, assigned_rider_phone, meal_id, meal_name, meal_category, dietary_tags, scheduled_date, scheduled_time_slot, status, quantity, unit_price, metadata, customer_note, recovery_action, recovery_reason, recovery_notes, refund_amount, original_scheduled_date, original_scheduled_time_slot, created_at";
 
 const isPaymentConfirmed = (paymentStatus?: string | null) =>
   paymentStatus === "paid" || paymentStatus === "partial" || paymentStatus === "completed";
@@ -757,9 +766,7 @@ const Orders = () => {
 
     const orderMealsQuery = supabase
       .from("order_meals")
-      .select(
-        "id, order_id, assigned_rider_id, assigned_rider_name, assigned_rider_phone, meal_id, meal_name, scheduled_date, scheduled_time_slot, status, quantity, unit_price, metadata, customer_note, created_at"
-      )
+      .select(ORDER_MEAL_SELECT_FIELDS)
       .eq("scheduled_date", selectedMealDateKey)
       .order("scheduled_time_slot", { ascending: true })
       .order("created_at", { ascending: true })
@@ -856,9 +863,7 @@ const Orders = () => {
     while (true) {
       const { data, error } = await supabase
         .from("order_meals")
-        .select(
-          "id, order_id, assigned_rider_id, assigned_rider_name, assigned_rider_phone, meal_id, meal_name, scheduled_date, scheduled_time_slot, status, quantity, unit_price, metadata, customer_note, created_at"
-        )
+        .select(ORDER_MEAL_SELECT_FIELDS)
         .gte("scheduled_date", weekStartKey)
         .lte("scheduled_date", weekEndKey)
         .order("scheduled_date", { ascending: true })
@@ -1055,9 +1060,7 @@ const Orders = () => {
       while (orderIdBatch.length > 0) {
         const { data, error } = await supabase
           .from("order_meals")
-          .select(
-            "id, order_id, assigned_rider_id, assigned_rider_name, assigned_rider_phone, meal_id, meal_name, scheduled_date, scheduled_time_slot, status, quantity, unit_price, metadata, customer_note, created_at"
-          )
+          .select(ORDER_MEAL_SELECT_FIELDS)
           .in("order_id", orderIdBatch)
           .order("scheduled_date", { ascending: true })
           .order("scheduled_time_slot", { ascending: true })
@@ -1406,6 +1409,92 @@ const Orders = () => {
     }
   };
 
+  const splitOrderMealInstance = async (
+    meal: NormalizedOrderMeal,
+    updates: Partial<Tables<"order_meals">> & {
+      status?: NormalizedOrderMealStatus;
+      recovery_action?: NormalizedMealRecoveryAction | null;
+    },
+  ) => {
+    const sourceRefs = getMealSourceRefs(meal);
+    const orderMealRefs = sourceRefs.filter(
+      (ref): ref is Extract<MealSourceRef, { source: "order_meals" }> => ref.source === "order_meals",
+    );
+
+    if (orderMealRefs.length !== 1 || meal.quantity_group_size <= 1) {
+      return false;
+    }
+
+    const sourceMealId = orderMealRefs[0].id;
+    const { data: sourceMeal, error: sourceMealError } = await supabase
+      .from("order_meals")
+      .select("*")
+      .eq("id", sourceMealId)
+      .single();
+
+    if (sourceMealError) throw sourceMealError;
+
+    const sourceQuantity = Math.max(1, Number(sourceMeal.quantity || 1));
+    if (sourceQuantity <= 1) return false;
+
+    const instanceIndex = meal.quantity_instance_index || 1;
+    const sourceMetadata =
+      sourceMeal.metadata && typeof sourceMeal.metadata === "object" && !Array.isArray(sourceMeal.metadata)
+        ? (sourceMeal.metadata as Record<string, unknown>)
+        : {};
+    const existingInstanceIndices = Array.isArray(sourceMetadata.quantity_instance_indices)
+      ? sourceMetadata.quantity_instance_indices.filter((value): value is number => typeof value === "number")
+      : Array.from({ length: sourceQuantity }, (_, index) => index + 1);
+    const remainingInstanceIndices = existingInstanceIndices.filter((index) => index !== instanceIndex);
+    const nextSourceMetadata =
+      {
+        ...sourceMetadata,
+        quantity_group_size: Math.max(meal.quantity_group_size || sourceQuantity, sourceQuantity),
+        quantity_instance_indices:
+          remainingInstanceIndices.length === sourceQuantity - 1
+            ? remainingInstanceIndices
+            : Array.from({ length: sourceQuantity - 1 }, (_, index) => index + 1),
+        split_remaining_from_quantity: sourceQuantity,
+      };
+    const splitMetadata = {
+      ...sourceMetadata,
+      split_from_order_meal_id: sourceMeal.id,
+      split_from_quantity: sourceQuantity,
+      quantity_group_size: Math.max(meal.quantity_group_size || sourceQuantity, sourceQuantity),
+      quantity_instance_index: instanceIndex,
+    };
+
+    const { error: decrementError } = await supabase
+      .from("order_meals")
+      .update({
+        quantity: sourceQuantity - 1,
+        metadata: nextSourceMetadata,
+      })
+      .eq("id", sourceMeal.id);
+
+    if (decrementError) throw decrementError;
+
+    const {
+      id: _id,
+      created_at: _createdAt,
+      updated_at: _updatedAt,
+      ...sourceInsertFields
+    } = sourceMeal;
+
+    const { error: insertError } = await supabase
+      .from("order_meals")
+      .insert({
+        ...sourceInsertFields,
+        ...updates,
+        quantity: 1,
+        metadata: splitMetadata,
+      });
+
+    if (insertError) throw insertError;
+
+    return true;
+  };
+
   const updateMealRecord = async (
     meal: NormalizedOrderMeal,
     order: Order,
@@ -1436,12 +1525,16 @@ const Orders = () => {
         .map((ref) => ref.id);
 
       if (orderMealIds.length > 0) {
-        const response = await supabase
-          .from("order_meals")
-          .update(updates)
-          .in("id", orderMealIds);
+        const didSplitInstance = await splitOrderMealInstance(meal, updates);
 
-        if (response.error) throw response.error;
+        if (!didSplitInstance) {
+          const response = await supabase
+            .from("order_meals")
+            .update(updates)
+            .in("id", orderMealIds);
+
+          if (response.error) throw response.error;
+        }
       }
 
       const legacyRefs = sourceRefs.filter(
@@ -1666,7 +1759,7 @@ const Orders = () => {
       const phone = getDeliveryContactPhone(order.delivery_address, order.profiles.phone_number || "");
       const location = formatAddressText(order.delivery_address);
 
-      return order.meals.map((meal) => ({
+      return expandOrderMealInstances(order.meals).map((meal) => ({
         meal: {
           ...meal,
           assigned_rider_id: order.profiles.assigned_rider_id || meal.assigned_rider_id,
@@ -1711,7 +1804,7 @@ const Orders = () => {
       const phone = getDeliveryContactPhone(order.delivery_address, order.profiles.phone_number || "");
       const location = formatAddressText(order.delivery_address);
 
-      return order.meals.map((meal) => ({
+      return expandOrderMealInstances(order.meals).map((meal) => ({
         meal: {
           ...meal,
           assigned_rider_id: order.profiles.assigned_rider_id || meal.assigned_rider_id,
@@ -2332,7 +2425,7 @@ const Orders = () => {
       meal_breakdown: order.meals
         .map(
           (meal) =>
-            `${meal.meal_name} (${meal.scheduled_date || "-"} ${meal.scheduled_time_slot || ""}, ${meal.status})`,
+            `${meal.meal_name}${getMealInstanceLabel(meal) ? ` ${getMealInstanceLabel(meal)}` : ""} (${meal.scheduled_date || "-"} ${meal.scheduled_time_slot || ""}, ${meal.status})`,
         )
         .join(" | "),
       total_amount: order.total_amount,
@@ -2426,9 +2519,9 @@ const Orders = () => {
         row[`${dayKey}_has_meal`] = meals.length > 0 ? "Yes" : "No";
         row[`${dayKey}_meals`] = meals
           .map((mealRow) => {
-            const quantityText = mealRow.meal.quantity > 1 ? ` x${mealRow.meal.quantity}` : "";
+            const instanceText = getMealInstanceLabel(mealRow.meal) ? ` ${getMealInstanceLabel(mealRow.meal)}` : "";
             const timeText = mealRow.meal.scheduled_time_slot ? ` (${mealRow.meal.scheduled_time_slot})` : "";
-            return `${mealRow.meal.meal_name}${quantityText}${timeText}`;
+            return `${mealRow.meal.meal_name}${instanceText}${timeText}`;
           })
           .join(" | ");
       }
@@ -2798,7 +2891,7 @@ const Orders = () => {
                         <TableHead className="w-[120px]">Contact</TableHead>
                         <TableHead className="min-w-[220px]">Meal Details</TableHead>
                         <TableHead className="min-w-[170px]">Assigned Rider</TableHead>
-                        <TableHead className="w-[60px]">Qty</TableHead>
+                        <TableHead className="w-[90px]">Instance</TableHead>
                         <TableHead className="min-w-[220px]">Notes</TableHead>
                         <TableHead className="w-[140px]">Status</TableHead>
                       </TableRow>
@@ -2841,7 +2934,14 @@ const Orders = () => {
                           <TableCell className="text-muted-foreground tabular-nums">{row.phone || "-"}</TableCell>
                           <TableCell>
                             <div className="space-y-1.5">
-                              <div className="font-semibold text-foreground">{row.meal.meal_name}</div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-semibold text-foreground">{row.meal.meal_name}</span>
+                                {getMealInstanceLabel(row.meal) && (
+                                  <Badge variant="secondary" className="text-[10px]">
+                                    {getMealInstanceLabel(row.meal)}
+                                  </Badge>
+                                )}
+                              </div>
                               <div className="text-xs text-muted-foreground">
                                 {getMealDayName(row.meal.scheduled_date) || "Unscheduled"}
                                 {row.meal.scheduled_date ? `, ${row.meal.scheduled_date}` : ""}
@@ -2865,7 +2965,9 @@ const Orders = () => {
                           <TableCell>
                             {renderRiderAssignmentControl(row)}
                           </TableCell>
-                          <TableCell className="font-semibold tabular-nums">{row.meal.quantity}</TableCell>
+                          <TableCell className="font-semibold tabular-nums">
+                            {getMealInstanceLabel(row.meal) || "Meal 1"}
+                          </TableCell>
                           <TableCell>
                             <p className="text-sm text-muted-foreground line-clamp-2">
                               {getMealNoteText(row.meal) || "-"}
@@ -3242,7 +3344,7 @@ const Orders = () => {
                                     <div key={getOrderedMealRowKey(row)} className="rounded-lg border border-border/50 bg-background p-2">
                                       <div className="flex items-start justify-between gap-2">
                                         <p className="text-sm font-semibold text-foreground leading-snug">{row.meal.meal_name}</p>
-                                        <span className="text-xs font-semibold tabular-nums">x{row.meal.quantity}</span>
+                                        <span className="text-xs font-semibold tabular-nums">{getMealInstanceLabel(row.meal) || "Meal 1"}</span>
                                       </div>
                                       {row.meal.scheduled_time_slot && (
                                         <p className="text-[11px] text-muted-foreground mt-1">{row.meal.scheduled_time_slot}</p>
