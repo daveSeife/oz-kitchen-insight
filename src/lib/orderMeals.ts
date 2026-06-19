@@ -26,6 +26,8 @@ export interface NormalizedOrderMeal {
   meal_type: string;
   dietary_tags: string[];
   quantity: number;
+  quantity_group_size: number;
+  quantity_instance_index: number | null;
   unit_price: number;
   scheduled_date: string;
   scheduled_time_slot: string;
@@ -282,6 +284,10 @@ export const normalizeOrderMealRow = (row: Record<string, unknown>): NormalizedO
     meal_type: pickMealType(row),
     dietary_tags: asArray(row.dietary_tags).filter((tag): tag is string => typeof tag === "string"),
     quantity: asNumber(row.quantity, 1),
+    quantity_group_size:
+      typeof metadata.quantity_group_size === "number" ? metadata.quantity_group_size : asNumber(row.quantity, 1),
+    quantity_instance_index:
+      typeof metadata.quantity_instance_index === "number" ? metadata.quantity_instance_index : null,
     unit_price: asNumber(row.unit_price, 0),
     scheduled_date: pickDate(row),
     scheduled_time_slot: pickTime(row),
@@ -335,6 +341,9 @@ export const parseLegacyMealSnapshot = (
       meal_type: pickMealType(record),
       dietary_tags: asArray(record.dietary_tags).filter((tag): tag is string => typeof tag === "string"),
       quantity: asNumber(record.quantity, 1),
+      quantity_group_size: asNumber(record.quantity, 1),
+      quantity_instance_index:
+        typeof record.quantity_instance_index === "number" ? record.quantity_instance_index : null,
       unit_price: asNumber(record.unit_price, 0),
       scheduled_date: pickDate(record, fallbackDate || ""),
       scheduled_time_slot: pickTime(record, fallbackTime || ""),
@@ -415,6 +424,43 @@ export const getMealSortKey = (meal: Pick<NormalizedOrderMeal, "scheduled_date" 
 
 export const sortNormalizedMeals = <T extends Pick<NormalizedOrderMeal, "scheduled_date" | "scheduled_time_slot" | "meal_name" | "created_at">>(meals: T[]) =>
   [...meals].sort((left, right) => getMealSortKey(left).localeCompare(getMealSortKey(right)));
+
+export const expandOrderMealInstances = (meals: NormalizedOrderMeal[]) =>
+  meals.flatMap((meal) => {
+    const quantity = Math.max(1, Math.floor(Number(meal.quantity || 1)));
+    const instanceIndices = Array.isArray(meal.metadata.quantity_instance_indices)
+      ? meal.metadata.quantity_instance_indices.filter((value): value is number => typeof value === "number")
+      : [];
+    const groupSize = Math.max(meal.quantity_group_size || quantity, quantity);
+
+    if (quantity <= 1) {
+      return [
+        {
+          ...meal,
+          quantity: 1,
+          quantity_group_size: groupSize,
+          quantity_instance_index: meal.quantity_instance_index || instanceIndices[0] || 1,
+        },
+      ];
+    }
+
+    return Array.from({ length: quantity }, (_, index) => ({
+      ...meal,
+      quantity: 1,
+      quantity_group_size: groupSize,
+      quantity_instance_index: instanceIndices[index] || index + 1,
+      metadata: {
+        ...meal.metadata,
+        quantity_group_size: groupSize,
+        quantity_instance_index: instanceIndices[index] || index + 1,
+      },
+    }));
+  });
+
+export const getMealInstanceLabel = (meal: Pick<NormalizedOrderMeal, "quantity_group_size" | "quantity_instance_index">) => {
+  if (!meal.quantity_instance_index || meal.quantity_group_size <= 1) return null;
+  return `Meal ${meal.quantity_instance_index}`;
+};
 
 export const getPrimaryMealSchedule = (
   meals: Array<Pick<NormalizedOrderMeal, "scheduled_date" | "scheduled_time_slot" | "meal_name" | "created_at" | "status">>,
