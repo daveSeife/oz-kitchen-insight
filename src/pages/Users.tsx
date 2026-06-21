@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
 import { Input } from "@/components/ui/input";
-import { Search, Users as UsersIcon, ShieldCheck, MoreVertical, WalletCards } from "lucide-react";
+import { ExternalLink, Search, Users as UsersIcon, ShieldCheck, MoreVertical, WalletCards } from "lucide-react";
 import { toast } from "sonner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
@@ -15,10 +15,24 @@ import { Switch } from "@/components/ui/switch";
 interface Profile {
   id: string; first_name: string; last_name: string; phone_number: string;
   role: string; created_at: string; referral_partner_id: string;
+  telegram_username?: string | null;
   use_alternate_account?: boolean | null;
   admin_role?: string; is_admin?: boolean;
 }
 
+const getTelegramUsername = (username?: string | null) => {
+  if (!username) return null;
+
+  const trimmedUsername = username.trim();
+  if (!trimmedUsername) return null;
+
+  const withoutProtocol = trimmedUsername.replace(/^https?:\/\//i, "");
+  const withoutDomain = withoutProtocol.replace(/^(t\.me|telegram\.me)\//i, "");
+  const withoutAt = withoutDomain.replace(/^@/, "");
+  const cleanUsername = withoutAt.split(/[/?#]/)[0];
+
+  return cleanUsername || null;
+};
 const Users = () => {
   const [users, setUsers] = useState<Profile[]>([]);
   const [loading, setLoading] = useState(true);
@@ -102,7 +116,8 @@ const Users = () => {
 
   const filteredUsers = users.filter((user) =>
     `${user.first_name} ${user.last_name}`.toLowerCase().includes(search.toLowerCase()) ||
-    user.phone_number?.toLowerCase().includes(search.toLowerCase())
+    user.phone_number?.toLowerCase().includes(search.toLowerCase()) ||
+    user.telegram_username?.toLowerCase().includes(search.toLowerCase())
   );
 
   const handleUserRowClick = (userId: string) => {
@@ -133,6 +148,7 @@ const Users = () => {
               <TableRow className="hover:bg-transparent border-border/50">
                 <TableHead>Name</TableHead>
                 <TableHead>Phone</TableHead>
+                <TableHead>Telegram</TableHead>
                 <TableHead>Payment Account</TableHead>
                 <TableHead>Admin Role</TableHead>
                 <TableHead>Referred</TableHead>
@@ -143,7 +159,7 @@ const Users = () => {
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={currentUserIsSuperAdmin ? 7 : 6} className="text-center py-12">
+                  <TableCell colSpan={currentUserIsSuperAdmin ? 8 : 7} className="text-center py-12">
                     <div className="flex flex-col items-center gap-3">
                       <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
                       <p className="text-sm text-muted-foreground">Loading users...</p>
@@ -152,7 +168,7 @@ const Users = () => {
                 </TableRow>
               ) : filteredUsers.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={currentUserIsSuperAdmin ? 7 : 6} className="text-center py-12">
+                  <TableCell colSpan={currentUserIsSuperAdmin ? 8 : 7} className="text-center py-12">
                     <div className="flex flex-col items-center gap-3">
                       <UsersIcon className="w-10 h-10 text-muted-foreground/30" />
                       <p className="text-sm text-muted-foreground">No users found</p>
@@ -160,7 +176,10 @@ const Users = () => {
                   </TableCell>
                 </TableRow>
               ) : (
-                filteredUsers.map((user) => (
+                filteredUsers.map((user) => {
+                  const telegramUsername = getTelegramUsername(user.telegram_username);
+
+                  return (
                   <TableRow 
                     key={user.id} 
                     className="border-border/50 cursor-pointer hover:bg-muted/50 transition-colors"
@@ -177,6 +196,21 @@ const Users = () => {
                       </div>
                     </TableCell>
                     <TableCell className="text-muted-foreground tabular-nums">{user.phone_number || "-"}</TableCell>
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      {telegramUsername ? (
+                        <a
+                          href={`https://t.me/${telegramUsername}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline"
+                        >
+                          @{telegramUsername}
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      ) : (
+                        <span className="text-muted-foreground text-sm">-</span>
+                      )}
+                    </TableCell>
                     <TableCell onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center gap-3">
                         <Switch
@@ -224,7 +258,8 @@ const Users = () => {
                       </TableCell>
                     )}
                   </TableRow>
-                ))
+                  );
+                })
               )}
             </TableBody>
           </Table>
