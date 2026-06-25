@@ -221,6 +221,22 @@ const WEEKDAY_COLUMNS = [
 
 const SUPABASE_IN_FILTER_BATCH_SIZE = 25;
 const toDateKey = (date: Date) => format(date, "yyyy-MM-dd");
+const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+const parseDateForDisplay = (value?: string | null) => {
+  if (!value) return null;
+
+  if (DATE_ONLY_PATTERN.test(value)) {
+    const [year, month, day] = value.split("-").map(Number);
+    return new Date(year, month - 1, day);
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const formatDateForDisplay = (value?: string | null) =>
+  parseDateForDisplay(value)?.toLocaleDateString() || "-";
 
 const chunkArray = <T,>(items: T[], size: number) => {
   const chunks: T[][] = [];
@@ -508,6 +524,9 @@ const isUnaccountedMeal = (row: OrderedMealRow) => !VALID_MEAL_STATUSES.has(row.
 
 const isFutureDeliverableMealStatus = (status: NormalizedOrderMealStatus) =>
   status === "scheduled" || status === "modified" || status === "rescheduled";
+
+const isOutstandingSubscriptionMealStatus = (status: NormalizedOrderMealStatus) =>
+  status === "scheduled" || status === "modified" || status === "rescheduled" || status === "missed";
 
 const deriveOrderStatusFromMeals = (meals: NormalizedOrderMeal[], currentStatus?: string | null): OrderStatus => {
   if (meals.length === 0) {
@@ -1184,7 +1203,12 @@ const Orders = () => {
               ].join("::"),
             ),
         );
+      const scheduledMealDates = meals
+        .map((meal) => meal.scheduledDate)
+        .filter((date): date is string => Boolean(date))
+        .sort();
       const activeMeals = meals.filter((meal) => !isInactiveMealStatus(meal.status));
+      const outstandingMeals = activeMeals.filter((meal) => isOutstandingSubscriptionMealStatus(meal.status));
       const futureMeals = activeMeals.filter((meal) => {
         if (meal.status === "delivered") return false;
         const scheduledAt = getMealDateTime({
@@ -1229,14 +1253,14 @@ const Orders = () => {
         planName: plan?.name || "Unknown plan",
         status: subscription.status || "unknown",
         paymentStatus: resolvedPaymentStatus,
-        startDate: subscription.start_date,
-        endDate: subscription.end_date,
+        startDate: scheduledMealDates[0] || subscription.start_date,
+        endDate: scheduledMealDates[scheduledMealDates.length - 1] || subscription.end_date,
         orderCount: subscriptionOrders.length,
         totalMeals: meals.reduce((sum, meal) => sum + meal.quantity, 0),
         deliveredMeals: meals
           .filter((meal) => meal.status === "delivered")
           .reduce((sum, meal) => sum + meal.quantity, 0),
-        remainingMeals: futureMeals.reduce((sum, meal) => sum + meal.quantity, 0),
+        remainingMeals: outstandingMeals.reduce((sum, meal) => sum + meal.quantity, 0),
         hasFutureMeals: futureMeals.length > 0,
         nextMealDate: sortedFutureMeals[0]?.scheduledDate || null,
         meals,
@@ -1978,27 +2002,30 @@ const Orders = () => {
     const isActiveSubscription = (subscription: SubscriptionDashboardRow) => {
       const status = subscription.status.toLowerCase();
       const inactiveStatuses = new Set(["cancelled", "canceled", "inactive", "failed"]);
-      const endDate = new Date(subscription.endDate);
+      const endDate = parseDateForDisplay(subscription.endDate);
 
       if (subscription.remainingMeals > 0) {
         return !inactiveStatuses.has(status);
       }
 
-      return !inactiveStatuses.has(status) && (Number.isNaN(endDate.getTime()) || endDate >= today);
+      return !inactiveStatuses.has(status) && (!endDate || endDate >= today);
     };
 
     const isCompletedSubscription = (subscription: SubscriptionDashboardRow) => {
       const status = subscription.status.toLowerCase();
-      const endDate = new Date(subscription.endDate);
-      const allKnownMealsDelivered =
+      const endDate = parseDateForDisplay(subscription.endDate);
+      const hasOutstandingMeals = subscription.meals.some(
+        (meal) => !isInactiveMealStatus(meal.status) && isOutstandingSubscriptionMealStatus(meal.status),
+      );
+      const allKnownMealsResolved =
         subscription.totalMeals > 0 &&
-        subscription.remainingMeals === 0 &&
-        subscription.deliveredMeals >= subscription.totalMeals;
+        !hasOutstandingMeals &&
+        subscription.deliveredMeals > 0;
 
       return (
-        ((status === "completed" || status === "expired") && subscription.remainingMeals === 0) ||
-        allKnownMealsDelivered ||
-        (!Number.isNaN(endDate.getTime()) && endDate < today && subscription.remainingMeals === 0)
+        ((status === "completed" || status === "expired") && !hasOutstandingMeals) ||
+        allKnownMealsResolved ||
+        Boolean(endDate && endDate < today && !hasOutstandingMeals && subscription.deliveredMeals > 0)
       );
     };
 
@@ -3474,7 +3501,7 @@ const Orders = () => {
                           </TableCell>
                           <TableCell className="font-semibold tabular-nums">{subscription.remainingMeals}</TableCell>
                           <TableCell className="text-muted-foreground tabular-nums">{subscription.nextMealDate || "-"}</TableCell>
-                          <TableCell className="text-muted-foreground tabular-nums">{new Date(subscription.endDate).toLocaleDateString()}</TableCell>
+                          <TableCell className="text-muted-foreground tabular-nums">{formatDateForDisplay(subscription.endDate)}</TableCell>
                         </TableRow>
                       ))
                     )}
@@ -3910,13 +3937,13 @@ const Orders = () => {
                     <div>
                       <p className="text-xs text-muted-foreground">Start</p>
                       <p className="text-sm font-medium tabular-nums">
-                        {selectedSubscription.startDate ? new Date(selectedSubscription.startDate).toLocaleDateString() : "-"}
+                        {formatDateForDisplay(selectedSubscription.startDate)}
                       </p>
                     </div>
                     <div>
                       <p className="text-xs text-muted-foreground">End</p>
                       <p className="text-sm font-medium tabular-nums">
-                        {selectedSubscription.endDate ? new Date(selectedSubscription.endDate).toLocaleDateString() : "-"}
+                        {formatDateForDisplay(selectedSubscription.endDate)}
                       </p>
                     </div>
                   </div>
